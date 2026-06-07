@@ -385,6 +385,90 @@ class TestRunEngineWithTempDir(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             engine.get_run("nonexistent-id")
 
+    # ------------------------------------------------------------------
+    # _recover_stale_runs (startup crash recovery)
+    # ------------------------------------------------------------------
+
+    def _write_raw_run(self, run_data: dict) -> Path:
+        """Write a raw run dict directly to RUNS_DIR (bypasses engine)."""
+        import run_engine as re_mod
+
+        ts = "2026-06-07-000000"
+        filename = f"{ts}-{run_data['id']}.json"
+        path = re_mod.RUNS_DIR / filename
+        path.write_text(json.dumps(run_data, indent=2))
+        return path
+
+    def test_recover_stale_running_run_is_aborted(self):
+        """A run stuck at status=running is aborted with all steps skipped on startup."""
+        run_data = {
+            "id": "stale001",
+            "status": "running",
+            "completed_at": None,
+            "pipeline": [
+                {"role": "coder", "status": "running", "task_id": "t-001"},
+                {"role": "tester", "status": "pending", "task_id": None},
+            ],
+        }
+        self._write_raw_run(run_data)
+
+        engine = self._engine()
+
+        updated = json.loads((list(self.tmp_path.glob("*stale001*"))[0]).read_text())
+        self.assertEqual(updated["status"], "aborted")
+        self.assertIsNotNone(updated["completed_at"])
+        for step in updated["pipeline"]:
+            self.assertEqual(step["status"], "skipped")
+
+    def test_recover_stale_pending_run_is_aborted(self):
+        """A run stuck at status=pending is also aborted on startup."""
+        run_data = {
+            "id": "stale002",
+            "status": "pending",
+            "completed_at": None,
+            "pipeline": [
+                {"role": "plan", "status": "pending", "task_id": None},
+            ],
+        }
+        self._write_raw_run(run_data)
+
+        engine = self._engine()
+
+        updated = json.loads((list(self.tmp_path.glob("*stale002*"))[0]).read_text())
+        self.assertEqual(updated["status"], "aborted")
+        for step in updated["pipeline"]:
+            self.assertEqual(step["status"], "skipped")
+
+    def test_recover_terminal_run_is_left_untouched(self):
+        """Runs in terminal states (done, failed, aborted) are not modified."""
+        for terminal_status in ("done", "failed", "aborted"):
+            run_data = {
+                "id": f"terminal-{terminal_status}",
+                "status": terminal_status,
+                "completed_at": "2026-06-07T00:00:00Z",
+                "pipeline": [
+                    {"role": "coder", "status": "done", "task_id": "t-x"},
+                ],
+            }
+            self._write_raw_run(run_data)
+
+        engine = self._engine()
+
+        for terminal_status in ("done", "failed", "aborted"):
+            run_id = f"terminal-{terminal_status}"
+            matches = [
+                p for p in self.tmp_path.glob("*.json") if f"-{run_id}" in p.name
+            ]
+            self.assertEqual(len(matches), 1)
+            on_disk = json.loads(matches[0].read_text())
+            self.assertEqual(on_disk["status"], terminal_status, f"status changed for {terminal_status}")
+
+    def test_recover_empty_runs_dir_does_not_raise(self):
+        """Startup recovery on an empty RUNS_DIR must not raise."""
+        engine = self._engine()
+        files = list(self.tmp_path.glob("*.json"))
+        self.assertEqual(len(files), 0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

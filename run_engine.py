@@ -73,6 +73,7 @@ class RunEngine:
 
     def __init__(self):
         RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        self._recover_stale_runs()
         log.debug("RunEngine initialised — RUNS_DIR: %s", RUNS_DIR)
 
     # ------------------------------------------------------------------
@@ -406,6 +407,34 @@ class RunEngine:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _recover_stale_runs(self) -> None:
+        """
+        Called once at startup to abort runs left in pending/running state
+        by a previous crash. Writes directly to disk — no lock needed at startup.
+        Does NOT call abort_run() because that does tmux kill-session, which is
+        useless noise when the sessions are already dead.
+        """
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for path in sorted(RUNS_DIR.glob("*.json")):
+            try:
+                data = json.loads(path.read_text())
+            except Exception:
+                continue
+            stale_status = data.get("status")
+            if stale_status not in ("pending", "running"):
+                continue
+            for step in data.get("pipeline", []):
+                if step.get("status") in ("pending", "running"):
+                    step["status"] = "skipped"
+            data["status"] = "aborted"
+            data["completed_at"] = now
+            path.write_text(json.dumps(data, indent=2))
+            log.warning(
+                "Startup recovery: aborted stale run %s (was %s)",
+                data.get("id"),
+                stale_status,
+            )
 
     def _find_next_pending_steps(self, pipeline: list) -> list:
         """
