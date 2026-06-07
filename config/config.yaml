@@ -1,0 +1,123 @@
+hermes:
+  name: "Hermes"
+  session_prefix: "hermes"
+  log_path: "/Users/raphael_the_great-sage/hermes/logs/hermes.log"
+
+# Trigger method: telegram | imessage | email | webhook | file_watch
+trigger:
+  method: "telegram"
+
+  telegram:
+    bot_token_keychain_service: "hermes-telegram-bot"
+    bot_token_keychain_account: "bot-token"
+    chat_id: 8922766986
+    trigger_prefix: "[HERMES]"
+    poll_interval_seconds: 15
+
+  imessage:
+    trigger_prefix: "[HERMES]"
+    # Your iPhone number (e.g. +14155551234) or Apple ID email — Hermes replies here
+    reply_to: "+14156239527"
+    poll_interval_seconds: 15
+
+  email:
+    imap_host: "imap.gmail.com"
+    imap_port: 993
+    username: "jaidensy07@gmail.com"
+    # Password stored in keychain — run:
+    # security add-generic-password -a "hermes" -s "hermes-gmail" -w "YOUR_APP_PASSWORD"
+    password_keychain_service: "hermes-gmail"
+    password_keychain_account: "hermes"
+    poll_interval_seconds: 30
+    trigger_subject_prefix: "[HERMES]"
+
+  webhook:
+    host: "0.0.0.0"
+    port: 7799
+    secret: "REPLACE_WITH_RANDOM_SECRET"
+
+  file_watch:
+    watch_dir: "/Users/raphael_the_great-sage/hermes/tasks"
+    poll_interval_seconds: 5
+
+notification:
+  method: "email"
+  email:
+    smtp_host: "smtp.gmail.com"
+    smtp_port: 587
+    to: "jaidensy07@gmail.com"
+    from: "jaidensy07@gmail.com"
+
+models:
+  primary: "claude-code"
+
+  anthropic:
+    heavy: "claude-opus-4-6"
+    fast: "claude-haiku-4-5-20251001"
+    keychain_service: "anthropic-api-key"
+    keychain_account: "hermes"
+
+  deepseek:
+    general: "deepseek-chat"
+    reasoning: "deepseek-reasoner"
+    keychain_service: "deepseek-api-key"
+    keychain_account: "hermes"
+    base_url: "https://api.deepseek.com"
+    privacy_warning: "PUBLIC TASKS ONLY — data stored in China"
+
+  qwen:
+    general: "qwen-turbo"
+    keychain_service: "qwen-api-key"
+    keychain_account: "hermes"
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    privacy_warning: "PUBLIC TASKS ONLY — data stored in China"
+
+  gemini:
+    vision: "gemini-2.5-flash-lite"
+    long_context: "gemini-3.5-flash"
+    keychain_service: "gemini-api-key"
+    keychain_account: "hermes"
+    base_url: "https://generativelanguage.googleapis.com/v1beta"
+
+  local:
+    base_url: "http://127.0.0.1:11434"
+    default: "llama3.1:8b"
+    fast: "llama3.2:3b"
+    code: "qwen2.5-coder:7b"
+    code_alt: "deepseek-coder-v2"
+    reasoning: "deepseek-r1:7b"
+    vision: "llava:7b"
+
+  routing:
+    - keywords: ["arbiter", "investor", "fundraising", "strategy", "supplier",
+                 "credentials", "api key", "secret", "private", "confidential"]
+      model: "anthropic.heavy"
+      reason: "Sensitive content — Anthropic only, never Chinese APIs"
+    - keywords: ["architect", "design system", "roadmap", "planning"]
+      model: "anthropic.heavy"
+      reason: "Complex reasoning — worth Opus cost"
+    - keywords: ["status", "check", "ping", "health", "is running", "report back"]
+      model: "anthropic.fast"
+      reason: "Simple status — Haiku is fast and cheap"
+    - keywords: ["offline", "local", "private", "no api"]
+      model: "local.default"
+      reason: "Explicit local request"
+    - keywords: ["debug", "fix bug", "refactor", "write tests", "pytest"]
+      model: "local.code"
+      reason: "Code tasks — qwen2.5-coder locally"
+    - keywords: ["reddit", "comment", "draft post", "social media", "copy",
+                 "marketing", "ad hook", "caption"]
+      model: "deepseek.general"
+      reason: "Public content — DeepSeek V4-Flash"
+    - keywords: ["image", "screenshot", "photo", "describe this", "analyze image"]
+      model: "gemini.vision"
+      reason: "Multimodal — Gemini Flash-Lite"
+    - keywords: ["long document", "long context", "full file", "entire codebase"]
+      model: "gemini.long_context"
+      reason: "1M token window — Gemini 3.5 Flash"
+    - keywords: ["throwaway", "cheap", "disposable", "quick draft"]
+      model: "qwen.general"
+      reason: "Absolute cheapest — Qwen-Turbo"
+    - keywords: ["*"]
+      model: "claude-code"
+      reason: "General orchestration default"

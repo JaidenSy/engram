@@ -1,0 +1,390 @@
+"""
+test_run_engine.py — Unit tests for hermes/run_engine.py
+
+Tests cover:
+  1. State transitions: create_run → mark_step_started → mark_step_done → advance to next → final done
+  2. Abort: create_run, abort_run → status=aborted, pending steps=skipped
+  3. Parallel group: pipeline with two steps sharing parallel_group=1 → _find_next_pending_steps returns both
+  4. One-active-run guard: second create_run while one active raises RuntimeError
+  5. mark_step_failed → run.status=failed, step.status=failed
+"""
+
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+# Make ~/hermes importable
+HERMES_DIR = Path.home() / "hermes"
+sys.path.insert(0, str(HERMES_DIR))
+
+
+def _make_planner_result(
+    tier=2, project="hermes", branch="feature/test", pipeline_steps=None
+):
+    """Build a minimal PlannerResult-like object for testing."""
+    from planner import PipelineStep, PlannerResult
+
+    if pipeline_steps is None:
+        pipeline_steps = [
+            PipelineStep("coder", None),
+            PipelineStep("tester", None),
+            PipelineStep("deployer", None),
+        ]
+    return PlannerResult(
+        tier=tier,
+        project=project,
+        branch_name=branch,
+        pipeline=pipeline_steps,
+        is_direct=False,
+        raw_ollama_response="",
+    )
+
+
+class TestRunEngineWithTempDir(unittest.TestCase):
+    """All tests use a temp directory for RUNS_DIR — never touch ~/hermes/runs/."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmpdir.name)
+
+        # Patch RUNS_DIR before importing RunEngine class
+        import run_engine as re_mod
+
+        self._orig_runs_dir = re_mod.RUNS_DIR
+        re_mod.RUNS_DIR = self.tmp_path
+
+        from run_engine import RunEngine
+
+        self.RunEngine = RunEngine
+        self.re_mod = re_mod
+
+    def tearDown(self):
+        self.re_mod.RUNS_DIR = self._orig_runs_dir
+        self._tmpdir.cleanup()
+
+    def _engine(self):
+        return self.RunEngine()
+
+    # ------------------------------------------------------------------
+    # create_run
+    # ------------------------------------------------------------------
+
+    def test_create_run_writes_json_with_pending_status(self):
+        engine = self._engine()
+        result = _make_planner_result()
+        run = engine.create_run("test task text", result)
+
+        self.assertEqual(run["status"], "pending")
+        self.assertEqual(run["project"], "hermes")
+        self.assertEqual(run["tier"], 2)
+        self.assertIsNotNone(run["id"])
+        self.assertEqual(len(run["pipeline"]), 3)
+
+        # Verify file was actually written
+        files = list(self.tmp_path.glob("*.json"))
+        self.assertEqual(len(files), 1)
+        on_disk = json.loads(files[0].read_text())
+        self.assertEqual(on_disk["id"], run["id"])
+        self.assertEqual(on_disk["status"], "pending")
+
+    def test_create_run_pipeline_steps_all_pending(self):
+        engine = self._engine()
+        result = _make_planner_result()
+        run = engine.create_run("another task", result)
+        for step in run["pipeline"]:
+            self.assertEqual(step["status"], "pending")
+            self.assertIsNone(step["task_id"])
+
+    # ------------------------------------------------------------------
+    # One-active-run guard
+    # ------------------------------------------------------------------
+
+    def test_second_create_run_raises_if_active(self):
+        """Creating a second run while one is running should raise RuntimeError."""
+        engine = self._engine()
+        result = _make_planner_result()
+        run = engine.create_run("task 1", result)
+
+        # Manually set status to running
+        engine._update_run_field(run["id"], "status", "running")
+
+        result2 = _make_planner_result(project="raph-ui")
+        with self.assertRaises(RuntimeError):
+            engine.create_run("task 2", result2)
+
+    def test_create_run_allowed_when_prior_is_done(self):
+        """A completed run should NOT block new run creation."""
+        engine = self._engine()
+        r1 = engine.create_run("task 1", _make_planner_result())
+        engine._update_run_field(r1["id"], "status", "done")
+
+        r2 = engine.create_run("task 2", _make_planner_result(project="raph-ui"))
+        self.assertIsNotNone(r2)
+        self.assertNotEqual(r1["id"], r2["id"])
+
+    # ------------------------------------------------------------------
+    # mark_step_started / mark_step_done
+    # ------------------------------------------------------------------
+
+    def test_mark_step_started_sets_task_id_and_running(self):
+        engine = self._engine()
+        result = _make_planner_result()
+        run = engine.create_run("task text", result)
+        run_id = run["id"]
+
+        engine.mark_step_started(run_id, 0, "task-001")
+        updated = engine.get_run(run_id)
+        step = updated["pipeline"][0]
+        self.assertEqual(step["status"], "running")
+        self.assertEqual(step["task_id"], "task-001")
+        self.assertIsNotNone(step["started_at"])
+
+    def test_mark_step_done_sets_completed_at(self):
+        engine = self._engine()
+        result = _make_planner_result()
+        run = engine.create_run("task text", result)
+        run_id = run["id"]
+
+        engine.mark_step_started(run_id, 0, "task-001")
+        engine.mark_step_done(run_id, 0, output_path="Projects/hermes/agents/output.md")
+
+        updated = engine.get_run(run_id)
+        step = updated["pipeline"][0]
+        self.assertEqual(step["status"], "done")
+        self.assertIsNotNone(step["completed_at"])
+        self.assertEqual(step["output_path"], "Projects/hermes/agents/output.md")
+
+    def test_mark_step_done_with_pr_url(self):
+        engine = self._engine()
+        result = _make_planner_result()
+        run = engine.create_run("task text", result)
+        run_id = run["id"]
+
+        engine.mark_step_started(run_id, 0, "task-deployer-001")
+        engine.mark_step_done(
+            run_id, 0, pr_url="https://github.com/JaidenSy/hermes/pull/42"
+        )
+
+        updated = engine.get_run(run_id)
+        self.assertEqual(
+            updated["pr_url"], "https://github.com/JaidenSy/hermes/pull/42"
+        )
+
+    # ------------------------------------------------------------------
+    # mark_step_failed
+    # ------------------------------------------------------------------
+
+    def test_mark_step_failed_sets_run_status_failed(self):
+        engine = self._engine()
+        result = _make_planner_result()
+        run = engine.create_run("task text", result)
+        run_id = run["id"]
+
+        engine.mark_step_started(run_id, 0, "task-fail-001")
+        engine.mark_step_failed(run_id, 0, reason="agent crashed")
+
+        updated = engine.get_run(run_id)
+        self.assertEqual(updated["status"], "failed")
+        self.assertEqual(updated["pipeline"][0]["status"], "failed")
+        self.assertIsNotNone(updated["completed_at"])
+
+    # ------------------------------------------------------------------
+    # abort_run
+    # ------------------------------------------------------------------
+
+    def test_abort_run_sets_status_and_skips_pending(self):
+        engine = self._engine()
+        result = _make_planner_result()
+        run = engine.create_run("task to abort", result)
+        run_id = run["id"]
+
+        # Set first step to running (simulating in-progress)
+        engine.mark_step_started(run_id, 0, "task-001")
+
+        with patch("run_engine.subprocess.run") as mock_sub:
+            mock_sub.return_value = MagicMock(returncode=0)
+            engine.abort_run(run_id)
+
+        updated = engine.get_run(run_id)
+        self.assertEqual(updated["status"], "aborted")
+        self.assertIsNotNone(updated["completed_at"])
+
+        # Running step becomes skipped; pending steps also become skipped
+        statuses = [s["status"] for s in updated["pipeline"]]
+        for s in statuses:
+            self.assertIn(s, ("skipped", "done"), f"Unexpected status: {s}")
+        # None should still be pending after abort
+        self.assertNotIn("pending", statuses)
+
+    def test_abort_attempts_tmux_kill_for_running_steps(self):
+        engine = self._engine()
+        result = _make_planner_result()
+        run = engine.create_run("task to abort with tmux", result)
+        run_id = run["id"]
+
+        engine.mark_step_started(run_id, 0, "task-abc-123")
+
+        with patch("run_engine.subprocess.run") as mock_sub:
+            mock_sub.return_value = MagicMock(returncode=0)
+            engine.abort_run(run_id)
+
+        # Should have called tmux kill-session for the running step
+        call_args_list = mock_sub.call_args_list
+        tmux_calls = [c for c in call_args_list if c[0][0][0] == "tmux"]
+        self.assertTrue(
+            len(tmux_calls) >= 1, "Expected at least one tmux kill-session call"
+        )
+
+    # ------------------------------------------------------------------
+    # get_active_run
+    # ------------------------------------------------------------------
+
+    def test_get_active_run_returns_none_when_none_running(self):
+        engine = self._engine()
+        result = engine.get_active_run()
+        self.assertIsNone(result)
+
+    def test_get_active_run_returns_running_run(self):
+        engine = self._engine()
+        result = _make_planner_result()
+        run = engine.create_run("task text", result)
+        self.assertIsNone(engine.get_active_run())
+
+        engine._update_run_field(run["id"], "status", "running")
+        active = engine.get_active_run()
+        self.assertIsNotNone(active)
+        self.assertEqual(active["id"], run["id"])
+
+    # ------------------------------------------------------------------
+    # _find_next_pending_steps (parallel group logic)
+    # ------------------------------------------------------------------
+
+    def test_find_next_pending_sequential(self):
+        engine = self._engine()
+        pipeline = [
+            {"role": "plan", "status": "pending", "parallel_group": None},
+            {"role": "coder", "status": "pending", "parallel_group": None},
+        ]
+        steps = engine._find_next_pending_steps(pipeline)
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0][1]["role"], "plan")
+
+    def test_find_next_pending_parallel_group_returns_both(self):
+        """Two pending steps with same parallel_group → both returned together."""
+        engine = self._engine()
+        pipeline = [
+            {"role": "research", "status": "pending", "parallel_group": 1},
+            {"role": "architect", "status": "pending", "parallel_group": 1},
+            {"role": "coder", "status": "pending", "parallel_group": None},
+        ]
+        steps = engine._find_next_pending_steps(pipeline)
+        self.assertEqual(len(steps), 2)
+        roles = [s["role"] for _, s in steps]
+        self.assertIn("research", roles)
+        self.assertIn("architect", roles)
+
+    def test_find_next_pending_skips_done_steps(self):
+        """Done step is skipped; next pending is returned."""
+        engine = self._engine()
+        pipeline = [
+            {"role": "plan", "status": "done", "parallel_group": None},
+            {"role": "coder", "status": "pending", "parallel_group": None},
+            {"role": "tester", "status": "pending", "parallel_group": None},
+        ]
+        steps = engine._find_next_pending_steps(pipeline)
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0][1]["role"], "coder")
+
+    def test_find_next_pending_empty_when_all_done(self):
+        engine = self._engine()
+        pipeline = [
+            {"role": "coder", "status": "done", "parallel_group": None},
+            {"role": "tester", "status": "done", "parallel_group": None},
+        ]
+        steps = engine._find_next_pending_steps(pipeline)
+        self.assertEqual(steps, [])
+
+    # ------------------------------------------------------------------
+    # poll_step_completion (mocked — no real waiting)
+    # ------------------------------------------------------------------
+
+    def test_poll_step_completion_returns_done_immediately(self):
+        """Mock task JSON on disk with status=done → poll should return 'done'."""
+        engine = self._engine()
+        result = _make_planner_result()
+        run = engine.create_run("task text", result)
+        run_id = run["id"]
+
+        # Write a fake task JSON to TASKS_DIR
+        with tempfile.TemporaryDirectory() as tasks_tmp:
+            tasks_path = Path(tasks_tmp)
+            task_id = "2026-06-07-001"
+            task_file = tasks_path / f"{task_id}.json"
+            task_file.write_text(json.dumps({"id": task_id, "status": "done"}))
+
+            # Patch TASKS_DIR
+            import run_engine as re_mod
+
+            orig_tasks = re_mod.TASKS_DIR
+            re_mod.TASKS_DIR = tasks_path
+
+            # Patch time.sleep to avoid real waiting; STEP_POLL_INTERVAL_S will run once
+            with patch("run_engine.time.sleep"):
+                status = engine.poll_step_completion(run_id, 0, task_id, timeout=60)
+
+            re_mod.TASKS_DIR = orig_tasks
+
+        self.assertEqual(status, "done")
+
+    def test_poll_step_completion_returns_failed(self):
+        """Task JSON with status=failed → poll returns 'failed'."""
+        engine = self._engine()
+        result = _make_planner_result()
+        run = engine.create_run("task text", result)
+        run_id = run["id"]
+
+        with tempfile.TemporaryDirectory() as tasks_tmp:
+            tasks_path = Path(tasks_tmp)
+            task_id = "2026-06-07-002"
+            task_file = tasks_path / f"{task_id}.json"
+            task_file.write_text(json.dumps({"id": task_id, "status": "failed"}))
+
+            import run_engine as re_mod
+
+            orig_tasks = re_mod.TASKS_DIR
+            re_mod.TASKS_DIR = tasks_path
+
+            with patch("run_engine.time.sleep"):
+                status = engine.poll_step_completion(run_id, 0, task_id, timeout=60)
+
+            re_mod.TASKS_DIR = orig_tasks
+
+        self.assertEqual(status, "failed")
+
+    # ------------------------------------------------------------------
+    # list_runs
+    # ------------------------------------------------------------------
+
+    def test_list_runs_returns_all(self):
+        engine = self._engine()
+        r1 = engine.create_run("task 1", _make_planner_result())
+        r2 = engine.create_run("task 2", _make_planner_result(branch="feature/b"))
+
+        # Mark r1 done so r2 can be created (guard check)
+        engine._update_run_field(r1["id"], "status", "done")
+        r2 = engine.create_run("task 2", _make_planner_result(branch="feature/b"))
+
+        runs = engine.list_runs()
+        self.assertGreaterEqual(len(runs), 2)
+
+    def test_get_run_raises_if_not_found(self):
+        engine = self._engine()
+        with self.assertRaises(FileNotFoundError):
+            engine.get_run("nonexistent-id")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
