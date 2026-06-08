@@ -13,7 +13,6 @@ Usage:
 import json
 import logging
 import re
-import subprocess
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -102,6 +101,22 @@ ACTION_KEYWORDS = [
     "update",
     "migrate",
     "deploy",
+    "work on",
+    "develop",
+    "make",
+    "set up",
+    "configure",
+    "integrate",
+    "design",
+    "stub",
+    "wire",
+    "connect",
+    "move",
+    "rename",
+    "delete",
+    "remove",
+    "bump",
+    "publish",
 ]
 
 # ---------------------------------------------------------------------------
@@ -192,6 +207,26 @@ def _tier_to_pipeline(tier: int) -> list:
     return _tier2_pipeline()  # default Tier 2
 
 
+def urgent_result(task_text: str) -> "PlannerResult":
+    """Return a Tier-1 PlannerResult with only coder → deployer for [URGENT] tasks."""
+    clean = _strip_filler(task_text)
+    task_lower = clean.lower()
+    project = "general"
+    for p in KNOWN_PROJECTS:
+        if p in task_lower:
+            project = p
+            break
+    slug = re.sub(r"[^a-z0-9]+", "-", task_lower[:50]).strip("-")
+    return PlannerResult(
+        tier=1,
+        project=project,
+        branch_name=f"hotfix/{slug}",
+        pipeline=[PipelineStep("coder", None), PipelineStep("deployer", None)],
+        is_direct=False,
+        raw_ollama_response="URGENT",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Privacy sanitizer
 # ---------------------------------------------------------------------------
@@ -250,16 +285,21 @@ def _is_direct_task(task_text: str) -> bool:
 
 
 def _call_ollama(prompt: str) -> str:
-    """Call ollama run llama3.1:8b with the given prompt. Returns stdout. Raises on failure."""
-    result = subprocess.run(
-        ["ollama", "run", "llama3.1:8b", prompt],
-        capture_output=True,
-        text=True,
-        timeout=30,
+    """Call the Ollama HTTP API to run llama3.1:8b. Faster than CLI subprocess."""
+    import urllib.request  # noqa: PLC0415
+
+    payload = json.dumps(
+        {"model": "llama3.1:8b", "prompt": prompt, "stream": False}
+    ).encode()
+    req = urllib.request.Request(
+        "http://localhost:11434/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"Ollama failed: {result.stderr.strip()}")
-    return result.stdout.strip()
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read().decode())
+    return data.get("response", "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -288,9 +328,40 @@ def _extract_json(raw: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+_FILLER_PREFIX_RE = re.compile(
+    r"^(nevermind[,.]?\s*|actually[,.]?\s*|wait[,.]?\s*|ignore that[,.]?\s*|"
+    r"on second thought[,.]?\s*|scratch that[,.]?\s*|instead[,.]?\s*)",
+    re.IGNORECASE,
+)
+
+_TIER_KEYWORDS: list[tuple[re.Pattern, int]] = [
+    (re.compile(r"\b(hotfix|hot.fix|tier.?1|quick.fix)\b", re.IGNORECASE), 1),
+    (
+        re.compile(
+            r"\b(architecture|arch|tier.?3|redesign|rearchitect)\b", re.IGNORECASE
+        ),
+        3,
+    ),
+]
+
+
+def _strip_filler(text: str) -> str:
+    """Remove conversational filler from the start of a task string."""
+    return _FILLER_PREFIX_RE.sub("", text).strip()
+
+
+def _infer_tier(task_text: str) -> int:
+    """Infer tier from explicit keywords; default to 2."""
+    for pattern, tier in _TIER_KEYWORDS:
+        if pattern.search(task_text):
+            return tier
+    return 2
+
+
 def _fallback_result(task_text: str) -> PlannerResult:
-    """Called when Ollama fails or returns unparseable JSON. Defaults to Tier 2."""
-    task_lower = task_text.lower()
+    """Called when Ollama fails or is bypassed (privacy keywords). Infers tier from keywords."""
+    clean_text = _strip_filler(task_text)
+    task_lower = clean_text.lower()
 
     # Heuristic: look for known project names in task text
     project = "general"
@@ -299,17 +370,18 @@ def _fallback_result(task_text: str) -> PlannerResult:
             project = p
             break
 
+    tier = _infer_tier(task_text)
     slug = re.sub(r"[^a-z0-9]+", "-", task_lower[:50]).strip("-")
 
     log.warning(
-        f"[planner] Falling back to Tier 2 default for task: {task_text[:60]!r}"
+        f"[planner] Fallback classification: tier={tier} task: {task_text[:60]!r}"
     )
 
     return PlannerResult(
-        tier=2,
+        tier=tier,
         project=project,
         branch_name=f"feature/{slug}",
-        pipeline=_tier2_pipeline(),
+        pipeline=_tier_to_pipeline(tier),
         is_direct=False,
         raw_ollama_response="FALLBACK",
     )
@@ -419,11 +491,11 @@ def classify_task(task_text: str) -> PlannerResult:
             raw_ollama_response=raw,
         )
 
-    except subprocess.TimeoutExpired:
+    except TimeoutError:
         log.warning("[planner] Ollama timed out after 30s — falling back to Tier 2")
         return _fallback_result(task_text)
-    except FileNotFoundError:
-        log.warning("[planner] Ollama not found — falling back to Tier 2")
+    except OSError:
+        log.warning("[planner] Ollama not reachable — falling back to Tier 2")
         return _fallback_result(task_text)
     except Exception as e:
         log.warning(
