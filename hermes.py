@@ -22,9 +22,13 @@ from email.mime.text import MIMEText
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-from planner import classify_task, PlannerResult
+from planner import classify_task, urgent_result  # noqa: F401
+from planner import PlannerResult
 from run_engine import RunEngine
 from agent_runner import AgentRunner
+
+DEDUP_WINDOW_SECONDS = 60
+URGENT_PREFIX = "[URGENT]"
 
 CONFIG_PATH = Path.home() / "hermes" / "config" / "config.yaml"
 LOG_PATH = Path.home() / "hermes" / "logs" / "hermes.log"
@@ -463,13 +467,36 @@ def orchestrate_task(task_text: str, config: dict) -> str:
     """
     Route an incoming task through the planner.
 
+    - [URGENT] prefix: bypasses plan/review, forces coder → deployer pipeline.
     - Direct tasks (status checks, short queries): forwarded to run_task() synchronously.
     - Pipeline tasks: create a run file, start the engine in a daemon thread,
       return a start-confirmation string immediately (sent as the reply).
 
     config is the loaded config.yaml dict — needed for notification channel.
     """
-    result: PlannerResult = classify_task(task_text)
+    # Abort shortcut — always available regardless of prefix
+    if task_text.strip().lower().startswith("abort"):
+        engine = RunEngine()
+        active = engine.get_active_run()
+        if active:
+            try:
+                engine.abort_run(active["id"])
+                project = active.get("project", "unknown")
+                branch = active.get("branch", "")
+                return f"🛑 Aborted run {active['id']} — {project} / {branch}"
+            except Exception as exc:
+                log.warning(f"[orchestrate] abort_run failed: {exc}")
+                return f"⚠️ Abort failed: {exc}"
+        return "ℹ️ No active run to abort."
+
+    # [URGENT] bypass — skip plan/cleanup/review, go straight to coder → deployer
+    if task_text.strip().upper().startswith(URGENT_PREFIX):
+        task_text = task_text.strip()[len(URGENT_PREFIX) :].strip()
+        log.info(f"[URGENT] bypassing full pipeline: {task_text[:60]!r}")
+        result: PlannerResult = urgent_result(task_text)
+    else:
+        result = classify_task(task_text)
+
     log.info(
         f"[orchestrate] Classified: tier={result.tier} project={result.project!r} "
         f"is_direct={result.is_direct} steps={len(result.pipeline)}"
@@ -561,6 +588,7 @@ class TelegramPoller:
             self.cfg["bot_token_keychain_account"],
         )
         self.offset = self._load_offset()
+        self._dedup: dict[str, float] = {}  # task_text → last-seen timestamp
         log.info(f"Telegram poller ready — chat_id={self.chat_id} offset={self.offset}")
 
     def _load_offset(self) -> int:
@@ -608,6 +636,15 @@ class TelegramPoller:
                     if text.startswith(self.prefix)
                     else text
                 )
+
+                # Deduplication: ignore same task dispatched within DEDUP_WINDOW_SECONDS
+                now_ts = time.time()
+                last_seen = self._dedup.get(task, 0)
+                if now_ts - last_seen < DEDUP_WINDOW_SECONDS:
+                    log.info(f"[dedup] Telegram duplicate ignored: {task[:60]!r}")
+                    continue
+                self._dedup[task] = now_ts
+
                 log.info(f"Telegram task: {task[:80]}...")
                 try:
                     reply = orchestrate_task(task, self.hermes_cfg)
@@ -638,6 +675,7 @@ class iMessagePoller:
         self.prefix = self.cfg.get("trigger_prefix", "[HERMES]")
         self.hermes_cfg = config
         self.last_check = self._load_last_check()
+        self._dedup: dict[str, float] = {}  # task_text → last-seen timestamp
         log.info(
             f"iMessage poller ready (osascript, no FDA) — "
             f"tracking from {self.last_check:%Y-%m-%d %H:%M:%S}"
@@ -710,6 +748,15 @@ return output"""
         tasks = [m.strip() for m in output.split("|||HSEP|||") if m.strip()]
         for text in tasks:
             task = text[len(self.prefix) :].strip()
+
+            # Deduplication: ignore same task dispatched within DEDUP_WINDOW_SECONDS
+            now_ts = time.time()
+            last_seen = self._dedup.get(task, 0)
+            if now_ts - last_seen < DEDUP_WINDOW_SECONDS:
+                log.info(f"[dedup] iMessage duplicate ignored: {task[:60]!r}")
+                continue
+            self._dedup[task] = now_ts
+
             log.info(f"iMessage task: {task[:80]}...")
             reply = orchestrate_task(task, self.hermes_cfg)
             self._reply(reply[:1500])
