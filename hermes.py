@@ -178,6 +178,37 @@ def run_task(task: str, session_name: str = None) -> str:
 # Pipeline orchestration helpers
 # ---------------------------------------------------------------------------
 
+RAPHBRAIN_DAILY_DIR = Path.home() / "Documents" / "RaphBrain" / "Daily"
+
+
+def _append_pipeline_to_daily_note(
+    project: str, branch: str, final_status: str, duration: str, failed_step: str = ""
+) -> None:
+    """Append a one-liner pipeline result to today's RaphBrain daily note."""
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        daily_path = RAPHBRAIN_DAILY_DIR / f"{today}.md"
+
+        if final_status == "done":
+            line = f"\n- ✅ Hermes: `{project}/{branch}` done in {duration}"
+        elif final_status == "failed":
+            line = f"\n- ❌ Hermes: `{project}` failed at `{failed_step}` ({duration})"
+        elif final_status == "aborted":
+            line = f"\n- 🛑 Hermes: `{project}/{branch}` aborted ({duration})"
+        else:
+            return  # don't log unknown states
+
+        if daily_path.exists():
+            with daily_path.open("a") as f:
+                f.write(line)
+        else:
+            daily_path.parent.mkdir(parents=True, exist_ok=True)
+            daily_path.write_text(f"# {today}\n{line}\n")
+
+        log.info(f"[daily-note] Appended pipeline result to {daily_path.name}")
+    except Exception as exc:
+        log.warning(f"[daily-note] Failed to write to daily note: {exc}")
+
 
 def _format_duration(started_iso: str, ended_iso: str) -> str:
     """Return a human-readable duration like '2m 14s'."""
@@ -455,6 +486,16 @@ def _run_pipeline(
             )
 
         _send_reply(hermes_config, completion_msg)
+
+        # Append one-liner to today's RaphBrain daily note
+        failed_step = ""
+        if final_status == "failed":
+            failed_step = next(
+                (s["role"] for s in pipeline if s["status"] == "failed"), "unknown"
+            )
+        _append_pipeline_to_daily_note(
+            project, branch, final_status, total_duration, failed_step
+        )
     except Exception as exc:
         log.error(f"[orchestrate] Failed to send completion notification: {exc}")
 
