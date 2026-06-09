@@ -1,0 +1,18 @@
+[project]
+name = "hermes"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# E402: module-level import not at top — test files use sys.path.insert first (intentional)
+per-file-ignores = { "tests/*.py" = ["E402"] }
+
+[tool.mypy]
+ignore_missing_imports = true
+# Exclude files that depend on untyped third-party libs (yaml, requests, watchdog)
+# or that use try/except import fallbacks that confuse mypy
+exclude = ["hermes\\.py", "run_engine\\.py"]

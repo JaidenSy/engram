@@ -385,6 +385,224 @@ class TestRunEngineWithTempDir(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             engine.get_run("nonexistent-id")
 
+    # ------------------------------------------------------------------
+    # _recover_stale_runs (startup crash recovery)
+    # ------------------------------------------------------------------
+
+    def _write_raw_run(self, run_data: dict) -> Path:
+        """Write a raw run dict directly to RUNS_DIR (bypasses engine)."""
+        import run_engine as re_mod
+
+        ts = "2026-06-07-000000"
+        filename = f"{ts}-{run_data['id']}.json"
+        path = re_mod.RUNS_DIR / filename
+        path.write_text(json.dumps(run_data, indent=2))
+        return path
+
+    def test_recover_stale_running_run_is_aborted(self):
+        """A run stuck at status=running is aborted with all steps skipped on startup."""
+        run_data = {
+            "id": "stale001",
+            "status": "running",
+            "completed_at": None,
+            "pipeline": [
+                {"role": "coder", "status": "running", "task_id": "t-001"},
+                {"role": "tester", "status": "pending", "task_id": None},
+            ],
+        }
+        self._write_raw_run(run_data)
+
+        engine = self._engine()
+
+        updated = json.loads((list(self.tmp_path.glob("*stale001*"))[0]).read_text())
+        self.assertEqual(updated["status"], "aborted")
+        self.assertIsNotNone(updated["completed_at"])
+        for step in updated["pipeline"]:
+            self.assertEqual(step["status"], "skipped")
+
+    def test_recover_stale_pending_run_is_aborted(self):
+        """A run stuck at status=pending is also aborted on startup."""
+        run_data = {
+            "id": "stale002",
+            "status": "pending",
+            "completed_at": None,
+            "pipeline": [
+                {"role": "plan", "status": "pending", "task_id": None},
+            ],
+        }
+        self._write_raw_run(run_data)
+
+        engine = self._engine()
+
+        updated = json.loads((list(self.tmp_path.glob("*stale002*"))[0]).read_text())
+        self.assertEqual(updated["status"], "aborted")
+        for step in updated["pipeline"]:
+            self.assertEqual(step["status"], "skipped")
+
+    def test_recover_terminal_run_is_left_untouched(self):
+        """Runs in terminal states (done, failed, aborted) are not modified."""
+        for terminal_status in ("done", "failed", "aborted"):
+            run_data = {
+                "id": f"terminal-{terminal_status}",
+                "status": terminal_status,
+                "completed_at": "2026-06-07T00:00:00Z",
+                "pipeline": [
+                    {"role": "coder", "status": "done", "task_id": "t-x"},
+                ],
+            }
+            self._write_raw_run(run_data)
+
+        engine = self._engine()
+
+        for terminal_status in ("done", "failed", "aborted"):
+            run_id = f"terminal-{terminal_status}"
+            matches = [
+                p for p in self.tmp_path.glob("*.json") if f"-{run_id}" in p.name
+            ]
+            self.assertEqual(len(matches), 1)
+            on_disk = json.loads(matches[0].read_text())
+            self.assertEqual(
+                on_disk["status"],
+                terminal_status,
+                f"status changed for {terminal_status}",
+            )
+
+    def test_recover_empty_runs_dir_does_not_raise(self):
+        """Startup recovery on an empty RUNS_DIR must not raise."""
+        engine = self._engine()
+        files = list(self.tmp_path.glob("*.json"))
+        self.assertEqual(len(files), 0)
+
+    # ------------------------------------------------------------------
+    # retry_count field in create_run
+    # ------------------------------------------------------------------
+
+    def test_create_run_steps_have_retry_count_zero(self):
+        """Every step in a newly created run has retry_count=0."""
+        engine = self._engine()
+        run = engine.create_run("test task", _make_planner_result())
+        for step in run["pipeline"]:
+            self.assertIn("retry_count", step, "retry_count missing from step")
+            self.assertEqual(step["retry_count"], 0)
+
+    # ------------------------------------------------------------------
+    # reset_step_for_retry
+    # ------------------------------------------------------------------
+
+    def test_reset_step_for_retry_increments_count_and_clears_state(self):
+        """reset_step_for_retry resets status/task_id/started_at and bumps retry_count."""
+        engine = self._engine()
+        run = engine.create_run("test", _make_planner_result())
+        run_id = run["id"]
+
+        engine.mark_step_started(run_id, 0, "task-x-001")
+        engine.reset_step_for_retry(run_id, 0)
+
+        updated = engine.get_run(run_id)
+        step = updated["pipeline"][0]
+        self.assertEqual(step["status"], "pending")
+        self.assertIsNone(step["task_id"])
+        self.assertIsNone(step["started_at"])
+        self.assertEqual(step["retry_count"], 1)
+
+    def test_reset_step_for_retry_does_not_change_run_status(self):
+        """reset_step_for_retry must not touch run-level status."""
+        engine = self._engine()
+        run = engine.create_run("test", _make_planner_result())
+        run_id = run["id"]
+        engine._update_run_field(run_id, "status", "running")
+        engine.mark_step_started(run_id, 0, "task-y-001")
+
+        engine.reset_step_for_retry(run_id, 0)
+
+        updated = engine.get_run(run_id)
+        self.assertEqual(updated["status"], "running")
+
+    def test_reset_step_for_retry_second_call_increments_to_two(self):
+        """A second reset bumps retry_count to 2 (caller must enforce cap)."""
+        engine = self._engine()
+        run = engine.create_run("test", _make_planner_result())
+        run_id = run["id"]
+
+        engine.reset_step_for_retry(run_id, 0)
+        engine.reset_step_for_retry(run_id, 0)
+
+        updated = engine.get_run(run_id)
+        self.assertEqual(updated["pipeline"][0]["retry_count"], 2)
+
+    # ------------------------------------------------------------------
+    # _cleanup_old_runs
+    # ------------------------------------------------------------------
+
+    def _write_raw_run_with_mtime(self, run_data: dict, age_days: float) -> Path:
+        """Write a raw run and backdate its mtime by age_days days."""
+        import os
+        import time as _time
+
+        path = self._write_raw_run(run_data)
+        old_mtime = _time.time() - age_days * 86400
+        os.utime(path, (old_mtime, old_mtime))
+        return path
+
+    def test_cleanup_deletes_old_terminal_runs(self):
+        """Terminal runs (done/failed/aborted) older than RUNS_RETENTION_DAYS are deleted."""
+        from run_engine import RUNS_RETENTION_DAYS
+
+        for status in ("done", "failed", "aborted"):
+            run_data = {
+                "id": f"old-{status}",
+                "status": status,
+                "completed_at": "2020-01-01T00:00:00Z",
+                "pipeline": [],
+            }
+            self._write_raw_run_with_mtime(run_data, age_days=RUNS_RETENTION_DAYS + 1)
+
+        engine = self._engine()
+
+        remaining = list(self.tmp_path.glob("*.json"))
+        self.assertEqual(
+            len(remaining), 0, "Old terminal runs should have been deleted"
+        )
+
+    def test_cleanup_keeps_recent_terminal_runs(self):
+        """Terminal runs younger than RUNS_RETENTION_DAYS are kept."""
+        from run_engine import RUNS_RETENTION_DAYS
+
+        run_data = {
+            "id": "recent-done",
+            "status": "done",
+            "completed_at": "2026-06-07T00:00:00Z",
+            "pipeline": [],
+        }
+        self._write_raw_run_with_mtime(run_data, age_days=RUNS_RETENTION_DAYS - 1)
+
+        engine = self._engine()
+
+        remaining = list(self.tmp_path.glob("*.json"))
+        self.assertEqual(len(remaining), 1, "Recent terminal run should be kept")
+
+    def test_cleanup_keeps_active_runs_regardless_of_age(self):
+        """Pending/running runs are never deleted even if very old."""
+        from run_engine import RUNS_RETENTION_DAYS
+
+        for status in ("pending", "running"):
+            run_data = {
+                "id": f"active-{status}",
+                "status": status,
+                "completed_at": None,
+                "pipeline": [{"role": "coder", "status": status, "task_id": None}],
+            }
+            self._write_raw_run_with_mtime(run_data, age_days=RUNS_RETENTION_DAYS + 30)
+
+        # active runs are recovered (set to aborted) then NOT deleted (they're fresh-aborted)
+        engine = self._engine()
+
+        # After recovery they'll be aborted but mtime updated to now, so should survive
+        remaining = list(self.tmp_path.glob("*.json"))
+        self.assertEqual(
+            len(remaining), 2, "Recovered active runs should not be deleted"
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

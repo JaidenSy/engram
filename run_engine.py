@@ -26,6 +26,7 @@ TASKS_DIR = Path.home() / "raphael" / "tasks"
 STEP_POLL_INTERVAL_S = 5  # poll raphael task JSON every 5 seconds
 STEP_TIMEOUT_S = 3600  # 60-min hard timeout per step
 RUN_FILE_LOCK_TIMEOUT_S = 5  # max wait to acquire file lock
+RUNS_RETENTION_DAYS = 7  # delete terminal runs older than this many days
 
 log = logging.getLogger("hermes")
 
@@ -41,12 +42,12 @@ except ImportError:
     from dataclasses import dataclass
     from typing import Optional as _Opt
 
-    @dataclass
+    @dataclass  # type: ignore[no-redef]
     class PipelineStep:
         role: str
         parallel_group: _Opt[int] = None
 
-    @dataclass
+    @dataclass  # type: ignore[no-redef]
     class PlannerResult:
         tier: int
         project: str
@@ -73,6 +74,8 @@ class RunEngine:
 
     def __init__(self):
         RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        self._recover_stale_runs()
+        self._cleanup_old_runs()
         log.debug("RunEngine initialised — RUNS_DIR: %s", RUNS_DIR)
 
     # ------------------------------------------------------------------
@@ -88,9 +91,7 @@ class RunEngine:
         """
         active = self.get_active_run()
         if active:
-            raise RuntimeError(
-                f"Run {active['id']!r} is already active — abort it first"
-            )
+            raise RuntimeError(f"Run {active['id']!r} is already active — abort it first")
 
         RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -108,6 +109,7 @@ class RunEngine:
                 "completed_at": None,
                 "output_path": None,
                 "parallel_group": step.parallel_group,
+                "retry_count": 0,
             }
             for step in result.pipeline
         ]
@@ -188,9 +190,7 @@ class RunEngine:
                 run_id,
                 {
                     "status": final_status,
-                    "completed_at": datetime.now(timezone.utc).strftime(
-                        "%Y-%m-%dT%H:%M:%SZ"
-                    ),
+                    "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 },
             )
             log.info("Run %s complete — status=%s", run_id, final_status)
@@ -256,9 +256,7 @@ class RunEngine:
             run["pipeline"][step_index]["role"],
         )
 
-    def mark_step_failed(
-        self, run_id: str, step_index: int, reason: Optional[str] = None
-    ) -> None:
+    def mark_step_failed(self, run_id: str, step_index: int, reason: Optional[str] = None) -> None:
         """
         Sets pipeline[step_index].status=failed and run.status=failed.
         Stops pipeline advancement (caller must not call advance_pipeline after this).
@@ -276,6 +274,27 @@ class RunEngine:
             run_id,
             run["pipeline"][step_index]["role"],
             reason,
+        )
+
+    def reset_step_for_retry(self, run_id: str, step_index: int) -> None:
+        """
+        Resets a failed/timed-out step back to pending so the caller can
+        re-dispatch it.  Increments retry_count so the caller can enforce
+        a retry cap.  Does NOT change run-level status.
+        """
+        run = self.get_run(run_id)
+        step = run["pipeline"][step_index]
+        step["retry_count"] = step.get("retry_count", 0) + 1
+        step["status"] = "pending"
+        step["task_id"] = None
+        step["started_at"] = None
+        self._write_run(run_id, run)
+        log.info(
+            "Step %d reset for retry (attempt %d) — run=%s role=%s",
+            step_index,
+            step["retry_count"],
+            run_id,
+            step.get("role"),
         )
 
     def get_active_run(self) -> Optional[dict]:
@@ -407,6 +426,57 @@ class RunEngine:
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _cleanup_old_runs(self) -> None:
+        """Delete terminal run files (done/failed/aborted) older than RUNS_RETENTION_DAYS."""
+        cutoff = datetime.now(timezone.utc).timestamp() - RUNS_RETENTION_DAYS * 86400
+        deleted = 0
+        for path in RUNS_DIR.glob("*.json"):
+            try:
+                if path.stat().st_mtime >= cutoff:
+                    continue
+                data = json.loads(path.read_text())
+                if data.get("status") not in ("done", "failed", "aborted"):
+                    continue
+                path.unlink()
+                deleted += 1
+                log.debug("Cleanup: deleted old run %s (%s)", data.get("id"), path.name)
+            except Exception:
+                pass
+        if deleted:
+            log.info(
+                "Cleanup: deleted %d run file(s) older than %d days",
+                deleted,
+                RUNS_RETENTION_DAYS,
+            )
+
+    def _recover_stale_runs(self) -> None:
+        """
+        Called once at startup to abort runs left in pending/running state
+        by a previous crash. Writes directly to disk — no lock needed at startup.
+        Does NOT call abort_run() because that does tmux kill-session, which is
+        useless noise when the sessions are already dead.
+        """
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for path in sorted(RUNS_DIR.glob("*.json")):
+            try:
+                data = json.loads(path.read_text())
+            except Exception:
+                continue
+            stale_status = data.get("status")
+            if stale_status not in ("pending", "running"):
+                continue
+            for step in data.get("pipeline", []):
+                if step.get("status") in ("pending", "running"):
+                    step["status"] = "skipped"
+            data["status"] = "aborted"
+            data["completed_at"] = now
+            path.write_text(json.dumps(data, indent=2))
+            log.warning(
+                "Startup recovery: aborted stale run %s (was %s)",
+                data.get("id"),
+                stale_status,
+            )
+
     def _find_next_pending_steps(self, pipeline: list) -> list:
         """
         Scans pipeline for the next batch of pending steps to dispatch.
@@ -490,9 +560,7 @@ class RunEngine:
             pr_url = None
             if step.get("role") == "deployer" and output_path:
                 pr_url = self._extract_pr_url(output_path)
-            self.mark_step_done(
-                run_id, step_index, output_path=output_path, pr_url=pr_url
-            )
+            self.mark_step_done(run_id, step_index, output_path=output_path, pr_url=pr_url)
 
         elif final_status in ("failed", "rate-limited", "timeout"):
             reason_map = {
@@ -513,9 +581,7 @@ class RunEngine:
                 step_index,
                 run_id,
             )
-            self.mark_step_failed(
-                run_id, step_index, reason=f"Unknown status: {final_status}"
-            )
+            self.mark_step_failed(run_id, step_index, reason=f"Unknown status: {final_status}")
 
     def _mark_step_running(self, run_id: str, step_index: int) -> None:
         """Sets pipeline[step_index].status=running, started_at=now."""

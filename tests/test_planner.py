@@ -328,5 +328,55 @@ class TestPlannerHelpers(unittest.TestCase):
         self.assertIn("plan", roles)
 
 
+class TestScaffoldDetection(unittest.TestCase):
+    """Tests for scaffold task detection in planner."""
+
+    def test_scaffold_project_name_basic(self):
+        from planner import _scaffold_project_name
+
+        self.assertEqual(
+            _scaffold_project_name("scaffold new project: mynewapp"), "mynewapp"
+        )
+
+    def test_scaffold_project_name_without_new(self):
+        from planner import _scaffold_project_name
+
+        self.assertEqual(_scaffold_project_name("scaffold project: coolapp"), "coolapp")
+
+    def test_scaffold_project_name_case_insensitive(self):
+        from planner import _scaffold_project_name
+
+        self.assertEqual(_scaffold_project_name("Scaffold New Project: MyApp"), "myapp")
+
+    def test_scaffold_project_name_with_hyphens(self):
+        from planner import _scaffold_project_name
+
+        self.assertEqual(
+            _scaffold_project_name("scaffold new project: my-cool-api"), "my-cool-api"
+        )
+
+    def test_scaffold_project_name_no_match(self):
+        from planner import _scaffold_project_name
+
+        self.assertIsNone(
+            _scaffold_project_name("add dark mode to Arbiter dashboard feature")
+        )
+
+    def test_classify_scaffold_returns_scaffold_project(self):
+        result = classify_task("scaffold new project: nexvault")
+        self.assertIsNotNone(result.scaffold_project)
+        self.assertEqual(result.scaffold_project, "nexvault")
+        self.assertTrue(result.is_direct)
+        self.assertEqual(result.tier, 0)
+
+    def test_classify_scaffold_skips_pipeline(self):
+        result = classify_task("scaffold new project: testapp")
+        self.assertEqual(len(result.pipeline), 0)
+
+    def test_classify_non_scaffold_has_no_scaffold_project(self):
+        result = classify_task("status")
+        self.assertIsNone(result.scaffold_project)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

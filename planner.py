@@ -41,6 +41,7 @@ class PlannerResult:
     pipeline: list  # list[PipelineStep]
     is_direct: bool  # True = skip pipeline, call run_task() directly
     raw_ollama_response: str  # stored for debug, not used downstream
+    scaffold_project: Optional[str] = None  # set when this is a scaffold request
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +74,24 @@ PRIVACY_KEYWORDS = [
     "private",
     "confidential",
 ]
+
+# ---------------------------------------------------------------------------
+# Scaffold-task detection
+# ---------------------------------------------------------------------------
+
+_SCAFFOLD_RE = re.compile(
+    r"scaffold(?:\s+new)?\s+project[:\s]+([a-z0-9][a-z0-9_-]*)",
+    re.IGNORECASE,
+)
+
+
+def _scaffold_project_name(task_text: str) -> Optional[str]:
+    """Return the normalised project name if this is a scaffold request, else None."""
+    m = _SCAFFOLD_RE.search(task_text)
+    if m:
+        return m.group(1).lower()
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Direct-task detection keywords
@@ -330,6 +349,20 @@ def classify_task(task_text: str) -> PlannerResult:
     3. Call Ollama to classify; parse and validate JSON response.
     4. On any failure: fall back to Tier 2 with heuristic project detection.
     """
+
+    # Step 0: Scaffold request — intercept before everything else
+    scaffold_name = _scaffold_project_name(task_text)
+    if scaffold_name:
+        log.info(f"[planner] Scaffold request detected: {scaffold_name!r}")
+        return PlannerResult(
+            tier=0,
+            project=scaffold_name,
+            branch_name="",
+            pipeline=[],
+            is_direct=True,
+            raw_ollama_response="",
+            scaffold_project=scaffold_name,
+        )
 
     # Step 1: Direct task shortcut — runs before Ollama
     if _is_direct_task(task_text):

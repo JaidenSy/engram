@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+logs/
+runs/
+tasks/
+config/telegram_state.json
+config/imessage_state.json
