@@ -88,36 +88,39 @@ models:
     reasoning: "deepseek-r1:7b"
     vision: "llava:7b"
 
-  routing:
-    - keywords: ["arbiter", "investor", "fundraising", "strategy", "supplier",
-                 "credentials", "api key", "secret", "private", "confidential"]
-      model: "anthropic.heavy"
-      reason: "Sensitive content — Anthropic only, never Chinese APIs"
-    - keywords: ["architect", "design system", "roadmap", "planning"]
-      model: "anthropic.heavy"
-      reason: "Complex reasoning — worth Opus cost"
-    - keywords: ["status", "check", "ping", "health", "is running", "report back"]
-      model: "anthropic.fast"
-      reason: "Simple status — Haiku is fast and cheap"
-    - keywords: ["offline", "local", "private", "no api"]
-      model: "local.default"
-      reason: "Explicit local request"
-    - keywords: ["debug", "fix bug", "refactor", "write tests", "pytest"]
-      model: "local.code"
-      reason: "Code tasks — qwen2.5-coder locally"
-    - keywords: ["reddit", "comment", "draft post", "social media", "copy",
-                 "marketing", "ad hook", "caption"]
-      model: "deepseek.general"
-      reason: "Public content — DeepSeek V4-Flash"
-    - keywords: ["image", "screenshot", "photo", "describe this", "analyze image"]
-      model: "gemini.vision"
-      reason: "Multimodal — Gemini Flash-Lite"
-    - keywords: ["long document", "long context", "full file", "entire codebase"]
-      model: "gemini.long_context"
-      reason: "1M token window — Gemini 3.5 Flash"
-    - keywords: ["throwaway", "cheap", "disposable", "quick draft"]
-      model: "qwen.general"
-      reason: "Absolute cheapest — Qwen-Turbo"
-    - keywords: ["*"]
-      model: "claude-code"
-      reason: "General orchestration default"
+  # ── Agent model routing (READ BY agent_runner.py — injected into task JSON,
+  # consumed by run-agent.sh). Aliases (haiku/sonnet/opus/fable) always resolve
+  # to the latest model of that tier via the claude CLI.
+  #
+  # Routing philosophy:
+  #   haiku  → mechanical steps (gather, polish, run a gh command)
+  #   sonnet → the workhorse (writing code, writing tests, planning)
+  #   opus   → judgment steps where a miss is expensive (review, architecture)
+  #   fable  → tier-3 only: deepest reasoning for system design + final review
+  agent_models:
+    # Direct tasks (status checks / lookups — no pipeline)
+    direct:
+      model: "haiku"
+      max_turns: 15
+
+    # Per-role defaults (all tiers)
+    roles:
+      plan:      { model: "sonnet", max_turns: 25 }   # plan quality gates the whole run
+      research:  { model: "haiku",  max_turns: 20 }
+      architect: { model: "opus",   max_turns: 40 }
+      coder:     { model: "sonnet", max_turns: 60 }
+      tester:    { model: "sonnet", max_turns: 30 }
+      cleanup:   { model: "haiku",  max_turns: 15 }
+      review:    { model: "opus",   max_turns: 35 }   # highest-leverage catch point
+      deployer:  { model: "haiku",  max_turns: 10 }
+
+    # Per-tier overrides (tier 3 = architecture work → strongest models
+    # on the steps that decide everything downstream)
+    tier_overrides:
+      1:
+        coder:   { model: "sonnet", max_turns: 40 }   # hotfix — smaller scope
+        tester:  { model: "haiku",  max_turns: 20 }
+      3:
+        plan:      { model: "opus",  max_turns: 30 }
+        architect: { model: "fable", max_turns: 40 }
+        review:    { model: "fable", max_turns: 35 }

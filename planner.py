@@ -28,9 +28,7 @@ log = logging.getLogger("hermes")
 @dataclass
 class PipelineStep:
     role: str  # plan|research|architect|coder|tester|cleanup|review|deployer
-    parallel_group: Optional[
-        int
-    ]  # None = sequential; int = run with all same-int steps
+    parallel_group: Optional[int]  # None = sequential; int = run with all same-int steps
 
 
 @dataclass
@@ -241,26 +239,12 @@ def _is_direct_task(task_text: str) -> bool:
     Return True if this looks like a status query or short lookup that
     doesn't require a full pipeline run.
 
-    Conditions (any one sufficient):
-    - len < 40 characters
-    - starts with a direct keyword
-    - contains NO action keywords
+    Action keywords always force a pipeline — "fix the login bug" is short
+    but is real work, not a lookup. Tasks with no action keywords (status
+    queries, questions, lookups) are direct.
     """
-    stripped = task_text.strip()
-    lower = stripped.lower()
-
-    if len(stripped) < 40:
-        return True
-
-    for kw in DIRECT_KEYWORDS:
-        if lower.startswith(kw):
-            return True
-
-    has_action = any(kw in lower for kw in ACTION_KEYWORDS)
-    if not has_action:
-        return True
-
-    return False
+    lower = task_text.strip().lower()
+    return not any(kw in lower for kw in ACTION_KEYWORDS)
 
 
 # ---------------------------------------------------------------------------
@@ -320,9 +304,7 @@ def _fallback_result(task_text: str) -> PlannerResult:
 
     slug = re.sub(r"[^a-z0-9]+", "-", task_lower[:50]).strip("-")
 
-    log.warning(
-        f"[planner] Falling back to Tier 2 default for task: {task_text[:60]!r}"
-    )
+    log.warning(f"[planner] Falling back to Tier 2 default for task: {task_text[:60]!r}")
 
     return PlannerResult(
         tier=2,
@@ -398,9 +380,7 @@ def classify_task(task_text: str) -> PlannerResult:
 
         # Validate required fields
         if "tier" not in data or "pipeline" not in data or "project" not in data:
-            raise ValueError(
-                f"Missing required fields in Ollama response: {list(data.keys())}"
-            )
+            raise ValueError(f"Missing required fields in Ollama response: {list(data.keys())}")
 
         tier = int(data["tier"])
         project = str(data["project"]).lower().strip()
@@ -425,17 +405,13 @@ def classify_task(task_text: str) -> PlannerResult:
             for s in raw_pipeline:
                 role = s["role"]
                 if role not in valid_roles:
-                    log.warning(
-                        f"[planner] Unknown role {role!r} from Ollama — using tier default"
-                    )
+                    log.warning(f"[planner] Unknown role {role!r} from Ollama — using tier default")
                     pipeline = _tier_to_pipeline(tier)
                     break
                 pg = s.get("parallel_group")
                 pipeline.append(PipelineStep(role, int(pg) if pg is not None else None))
         else:
-            log.warning(
-                "[planner] Empty or malformed pipeline from Ollama — using tier default"
-            )
+            log.warning("[planner] Empty or malformed pipeline from Ollama — using tier default")
             pipeline = _tier_to_pipeline(tier)
 
         log.info(
@@ -459,9 +435,7 @@ def classify_task(task_text: str) -> PlannerResult:
         log.warning("[planner] Ollama not found — falling back to Tier 2")
         return _fallback_result(task_text)
     except Exception as e:
-        log.warning(
-            f"[planner] Ollama classification failed ({e!r}) — falling back to Tier 2"
-        )
+        log.warning(f"[planner] Ollama classification failed ({e!r}) — falling back to Tier 2")
         return _fallback_result(task_text)
 
 

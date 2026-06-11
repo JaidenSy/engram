@@ -136,8 +136,18 @@ def run_task(task: str, session_name: Optional[str] = None) -> str:
     safe_task_file = shlex.quote(str(task_file))
     safe_log_file = shlex.quote(str(log_file))
 
+    # Direct tasks are status checks / lookups — route to the cheap model.
+    # Configurable via models.agent_models.direct in config.yaml.
+    try:
+        direct_cfg = load_config().get("models", {}).get("agent_models", {}).get("direct", {})
+    except Exception:
+        direct_cfg = {}
+    direct_model = direct_cfg.get("model", "haiku")
+    direct_max_turns = direct_cfg.get("max_turns", 15)
+
     shell_cmd = (
         f'claude --print "$(cat {safe_task_file})" '
+        f"--model {shlex.quote(str(direct_model))} --max-turns {int(direct_max_turns)} "
         f"2>&1 | tee {safe_log_file}; echo 'HERMES_DONE' >> {safe_log_file}"
     )
 

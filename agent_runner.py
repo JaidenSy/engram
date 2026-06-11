@@ -22,11 +22,41 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import yaml
+
 # ── Paths ──────────────────────────────────────────────────────────────────────
 TASKS_DIR = Path.home() / "raphael" / "tasks"
 RAPHBRAIN = Path.home() / "Documents" / "RaphBrain"
 RUN_AGENT = Path.home() / "raphael" / "agents" / "run-agent.sh"
 ROLES_DIR = Path.home() / "raphael" / "templates" / "roles"
+CONFIG_PATH = Path.home() / "hermes" / "config" / "config.yaml"
+
+# Used when config.yaml is missing or has no agent_models section
+DEFAULT_MODEL_ROUTE = {"model": "sonnet", "max_turns": 60}
+
+
+def resolve_model_route(role: str, tier: int) -> dict:
+    """
+    Resolve {model, max_turns} for a pipeline step from config.yaml
+    (models.agent_models). Tier overrides win over role defaults.
+    """
+    try:
+        with open(CONFIG_PATH) as f:
+            cfg = yaml.safe_load(f) or {}
+        agent_models = cfg.get("models", {}).get("agent_models", {})
+    except Exception as exc:
+        log.warning(f"[agent_runner] Could not load model routing config: {exc}")
+        return dict(DEFAULT_MODEL_ROUTE)
+
+    route = dict(DEFAULT_MODEL_ROUTE)
+    role_cfg = agent_models.get("roles", {}).get(role)
+    if role_cfg:
+        route.update(role_cfg)
+    tier_cfg = agent_models.get("tier_overrides", {}).get(tier, {}).get(role)
+    if tier_cfg:
+        route.update(tier_cfg)
+    return route
+
 
 # Ensure required directories exist on import
 TASKS_DIR.mkdir(parents=True, exist_ok=True)
@@ -122,9 +152,7 @@ class AgentRunner:
         prompt_file = TASKS_DIR / f"{task_id}-prompt.md"
 
         # Determine PR target branch for deployer role
-        target_branch = (
-            "main" if project in ("hermes", "raph-ui", "raphael") else "develop"
-        )
+        target_branch = "main" if project in ("hermes", "raph-ui", "raphael") else "develop"
 
         # Build and write prompt
         prompt_md = self._build_prompt(
@@ -154,9 +182,7 @@ class AgentRunner:
 
         # Spawn run-agent.sh (non-blocking tmux session)
         self._spawn_run_agent(task_id, task_file)
-        log.info(
-            f"[agent_runner] Spawned tmux session raphael-{task_id} for role={role}"
-        )
+        log.info(f"[agent_runner] Spawned tmux session raphael-{task_id} for role={role}")
 
         return task_id
 
@@ -176,6 +202,7 @@ class AgentRunner:
         role = step["role"]
         project = run["project"]
         tier = run.get("tier", 2)
+        route = resolve_model_route(role, tier)
 
         # Projects that don't live under ~/Projects/
         _PROJECT_PATHS = {
@@ -194,6 +221,9 @@ class AgentRunner:
             "team": "hermes",
             "role": role,
             "project": project,
+            "tier": tier,
+            "model": route["model"],
+            "max_turns": route["max_turns"],
             "repo": _PROJECT_PATHS.get(project, f"~/Projects/{project}"),
             "depends_on": [],
             "handoff_required": role not in ("deployer",),
@@ -227,9 +257,7 @@ class AgentRunner:
         branch = run.get("branch", "feature/unknown")
 
         # 1. Role system prompt (file-backed or inline fallback)
-        role_prompt = self._load_role_template(
-            role, branch=branch, target_branch=target_branch
-        )
+        role_prompt = self._load_role_template(role, branch=branch, target_branch=target_branch)
 
         # 2. Previous step outputs
         prev_outputs = self._collect_previous_outputs(run, step_index)
@@ -238,9 +266,7 @@ class AgentRunner:
         raphbrain_paths = self._raphbrain_context_section(project)
 
         # 4. Branch instruction (injected for all roles; critical for coder)
-        branch_section = (
-            f"## Branch\nWork on: `{branch}`\nNever commit to `main` or `develop`.\n"
-        )
+        branch_section = f"## Branch\nWork on: `{branch}`\nNever commit to `main` or `develop`.\n"
 
         parts = [
             role_prompt,
@@ -277,9 +303,7 @@ class AgentRunner:
                 return path.read_text().strip()
 
         # Inline fallback
-        template = INLINE_ROLE_TEMPLATES.get(
-            role, f"You are the {role.capitalize()} Agent."
-        )
+        template = INLINE_ROLE_TEMPLATES.get(role, f"You are the {role.capitalize()} Agent.")
         if role == "deployer":
             template = template.format(
                 branch=branch,
