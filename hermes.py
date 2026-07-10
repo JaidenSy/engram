@@ -182,6 +182,10 @@ def run_task(
         str(direct_model),
         "--max-turns",
         str(direct_max_turns),
+        # acceptEdits: auto-approve file edits so the agent can do real work;
+        # bash/other tools stay gated (auto-denied in this headless run).
+        "--permission-mode",
+        "acceptEdits",
     ]
 
     def _worker() -> None:
