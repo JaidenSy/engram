@@ -18,6 +18,8 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from project_registry import project_names, resolve
+
 log = logging.getLogger("hermes")
 
 # ---------------------------------------------------------------------------
@@ -43,18 +45,40 @@ class PlannerResult:
 
 
 # ---------------------------------------------------------------------------
-# Known projects for fallback heuristic
+# Project detection — backed by project_registry (single source of truth)
 # ---------------------------------------------------------------------------
 
-KNOWN_PROJECTS = [
-    "arbiter",
-    "hermes",
-    "raph-ui",
-    "raphael",
-    "dropshipping",
-    "nexvault",
-    "alphabot",
-]
+# Explicit target: "on arbiter, fix the login test" / "in alphabot: rebalance"
+_EXPLICIT_TARGET_RE = re.compile(
+    r"^\s*(?:on|in|for)\s+([\w.\-]+)\s*[,:]\s*(.+)$", re.IGNORECASE | re.DOTALL
+)
+# Bare "arbiter: fix X" (only accepted when the prefix resolves to a real project)
+_COLON_TARGET_RE = re.compile(r"^\s*([\w.\-]+)\s*:\s*(.+)$", re.DOTALL)
+
+
+def _parse_explicit_target(task_text: str) -> tuple:
+    """If the task names a project up front, return (canonical_name, remaining_task).
+
+    Deterministic routing — when Jaiden says "on <project>", never leave it to the
+    8B model's guess. Returns (None, task_text) when no known project is named.
+    """
+    for rx in (_EXPLICIT_TARGET_RE, _COLON_TARGET_RE):
+        m = rx.match(task_text)
+        if m:
+            p = resolve(m.group(1))
+            if p:
+                return p.name, m.group(2).strip()
+    return None, task_text
+
+
+def _detect_project(task_text: str) -> Optional[str]:
+    """Return the canonical name of the first known project mentioned, else None."""
+    for word in re.findall(r"[\w.\-]+", task_text):
+        p = resolve(word)
+        if p:
+            return p.name
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Privacy keywords — must NOT be sent to Ollama
@@ -291,18 +315,10 @@ def _extract_json(raw: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _fallback_result(task_text: str) -> PlannerResult:
+def _fallback_result(task_text: str, forced_project: Optional[str] = None) -> PlannerResult:
     """Called when Ollama fails or returns unparseable JSON. Defaults to Tier 2."""
-    task_lower = task_text.lower()
-
-    # Heuristic: look for known project names in task text
-    project = "general"
-    for p in KNOWN_PROJECTS:
-        if p in task_lower:
-            project = p
-            break
-
-    slug = re.sub(r"[^a-z0-9]+", "-", task_lower[:50]).strip("-")
+    project = forced_project or _detect_project(task_text) or "general"
+    slug = re.sub(r"[^a-z0-9]+", "-", task_text.lower()[:50]).strip("-")
 
     log.warning(f"[planner] Falling back to Tier 2 default for task: {task_text[:60]!r}")
 
@@ -346,12 +362,17 @@ def classify_task(task_text: str) -> PlannerResult:
             scaffold_project=scaffold_name,
         )
 
+    # Step 0.5: Explicit "on <project>, <task>" — deterministic routing, never a guess.
+    forced_project, task_text = _parse_explicit_target(task_text)
+    if forced_project:
+        log.info(f"[planner] Explicit target pinned: project={forced_project!r}")
+
     # Step 1: Direct task shortcut — runs before Ollama
     if _is_direct_task(task_text):
         log.info(f"[planner] Direct task detected (no pipeline): {task_text[:60]!r}")
         return PlannerResult(
             tier=0,
-            project="general",
+            project=forced_project or _detect_project(task_text) or "general",
             branch_name="",
             pipeline=[],
             is_direct=True,
@@ -364,12 +385,15 @@ def classify_task(task_text: str) -> PlannerResult:
             f"[planner] Privacy keywords found in task — bypassing Ollama, using fallback: "
             f"{task_text[:60]!r}"
         )
-        return _fallback_result(task_text)
+        return _fallback_result(task_text, forced_project)
 
     # Step 3: Build prompt and call Ollama
     sanitized_task = _sanitize_for_ollama(task_text)
+    projects_hint = 'Known project names (pick one for "project", else "general"): ' + ", ".join(
+        project_names()
+    )
     user_prompt = OLLAMA_USER_PROMPT.format(task_text=sanitized_task)
-    full_prompt = f"{OLLAMA_SYSTEM_PROMPT}\n\n{user_prompt}"
+    full_prompt = f"{OLLAMA_SYSTEM_PROMPT}\n\n{projects_hint}\n\n{user_prompt}"
 
     try:
         log.info(f"[planner] Calling Ollama to classify: {task_text[:60]!r}")
@@ -383,7 +407,11 @@ def classify_task(task_text: str) -> PlannerResult:
             raise ValueError(f"Missing required fields in Ollama response: {list(data.keys())}")
 
         tier = int(data["tier"])
-        project = str(data["project"]).lower().strip()
+        # Forced target wins; otherwise canonicalize Ollama's guess via the registry
+        # (an unknown name is kept as-is and caught by the fail-loud guard downstream).
+        ollama_project = str(data["project"]).lower().strip()
+        resolved = resolve(ollama_project)
+        project = forced_project or (resolved.name if resolved else ollama_project)
         branch_name = str(data.get("branch_name", f"feature/task-{int(time.time())}"))
         is_direct = bool(data.get("is_direct", False))
 
@@ -430,13 +458,13 @@ def classify_task(task_text: str) -> PlannerResult:
 
     except subprocess.TimeoutExpired:
         log.warning("[planner] Ollama timed out after 30s — falling back to Tier 2")
-        return _fallback_result(task_text)
+        return _fallback_result(task_text, forced_project)
     except FileNotFoundError:
         log.warning("[planner] Ollama not found — falling back to Tier 2")
-        return _fallback_result(task_text)
+        return _fallback_result(task_text, forced_project)
     except Exception as e:
         log.warning(f"[planner] Ollama classification failed ({e!r}) — falling back to Tier 2")
-        return _fallback_result(task_text)
+        return _fallback_result(task_text, forced_project)
 
 
 # ---------------------------------------------------------------------------

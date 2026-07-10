@@ -27,6 +27,7 @@ from planner import classify_task, PlannerResult
 from run_engine import RunEngine
 from agent_runner import AgentRunner
 from output_validator import validate_step_output
+from project_registry import project_map_text, project_names, resolve as resolve_project
 from scaffold_project import run_scaffold
 
 CONFIG_PATH = Path.home() / "hermes" / "config" / "config.yaml"
@@ -125,18 +126,6 @@ Be specific and factual. Only include what is supported by the partial output ab
 # ponytail: single fixed ceiling — make it per-task config if tasks ever vary wildly.
 DIRECT_SAFETY_TIMEOUT_S = 7200  # 2h
 
-# Injected into every direct-task prompt so the agent can locate work without
-# asking follow-up questions it can't receive (Hermes is fire-and-forget).
-# Keep in sync with ~/.claude/CLAUDE.md active projects.
-PROJECT_MAP = """Local projects (use these paths directly — do not ask for URLs/paths):
-- portfolio: ~/Projects/portfolio/index.html  (static one-file site; serve: python3 -m http.server 8090)
-- arbiter: ~/Projects/arbiter
-- alphabot: ~/Projects/alphabot
-- omegabot: ~/Projects/omegabot
-- finance-tracker: ~/Projects/finance-tracker
-- hermes: ~/hermes
-- RaphBrain notes vault: ~/Documents/RaphBrain"""
-
 
 def _resolve_claude_bin() -> str:
     """Absolute path to the claude CLI — a launchd daemon's PATH can be minimal."""
@@ -179,7 +168,7 @@ def run_task(
     cmd = [
         _resolve_claude_bin(),
         "--print",
-        f"{PROJECT_MAP}\n\n---\n\n{task}",
+        f"{project_map_text()}\n\n---\n\n{task}",
         "--model",
         str(direct_model),
         "--max-turns",
@@ -661,6 +650,20 @@ def orchestrate_task(task_text: str, config: dict) -> str:
             )
         return "⚪️ No active run."
 
+    # Discovery commands — help Jaiden drive from a phone without remembering the grammar.
+    _cmd = task_text.strip().lower().rstrip("?")
+    if _cmd in ("projects", "list projects"):
+        return "Known projects:\n" + "\n".join(f"• {n}" for n in project_names())
+    if _cmd in ("help", "commands", "menu"):
+        return (
+            "Hermes commands:\n"
+            "• on <project>, <task> — run in a project (e.g. `on alphabot, fix the rebalance bug`)\n"
+            "• <task> — I'll infer the project\n"
+            "• status — current run\n"
+            "• abort — cancel the active run\n"
+            "• projects — list known projects"
+        )
+
     result: PlannerResult = classify_task(task_text)
     log.info(
         f"[orchestrate] Classified: tier={result.tier} project={result.project!r} "
@@ -677,7 +680,17 @@ def orchestrate_task(task_text: str, config: dict) -> str:
         log.info("[orchestrate] Direct task — routing to run_task()")
         return run_task(task_text, on_complete=lambda r: _send_reply(config, r[:4096]))
 
-    # Pipeline task
+    # Pipeline task — fail loud on an unknown project rather than dispatching an
+    # agent that would silently run in $HOME against nothing.
+    proj = resolve_project(result.project)
+    if not proj or not proj.repo:
+        known = ", ".join(project_names())
+        log.warning(f"[orchestrate] Refusing pipeline for unresolvable project {result.project!r}")
+        return (
+            f"❓ Couldn't map that to a project with a repo (got {result.project!r}).\n"
+            f"Try prefixing it, e.g. `on arbiter, …`.\nKnown: {known}"
+        )
+
     engine = RunEngine()
     runner = AgentRunner()
 

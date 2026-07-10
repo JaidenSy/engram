@@ -27,7 +27,59 @@ from planner import (
     _fallback_result,
     _extract_json,
     _sanitize_for_ollama,
+    _parse_explicit_target,
+    _detect_project,
 )
+import project_registry as _pr
+
+_TMP_REG = None
+
+
+def setUpModule():
+    """Install a deterministic project registry so planner routing tests don't
+    depend on the host's ~/Projects (absent on CI)."""
+    global _TMP_REG
+    import tempfile
+
+    _TMP_REG = tempfile.TemporaryDirectory()
+    root = Path(_TMP_REG.name)
+    projects, rb = root / "Projects", root / "RaphBrain"
+    projects.mkdir()
+    rb.mkdir()
+    for n in ("arbiter", "alphabot", "vitre", "omegabot", "hermes", "raphael"):
+        (projects / n).mkdir()
+    (rb / "Vitré").mkdir()
+    _pr.set_test_registry(_pr.build_registry(projects, rb, extra_repos={}, detect_pr_base=False))
+
+
+def tearDownModule():
+    _pr.set_test_registry(None)
+    _TMP_REG.cleanup()
+
+
+class TestExplicitTarget(unittest.TestCase):
+    """`on <project>, <task>` pins the project deterministically (real registry)."""
+
+    def test_on_project_comma(self):
+        proj, rest = _parse_explicit_target("on arbiter, fix the login test")
+        self.assertEqual(proj, "arbiter")
+        self.assertEqual(rest, "fix the login test")
+
+    def test_colon_form_and_alias_accent(self):
+        self.assertEqual(_parse_explicit_target("alphabot: rebalance is off")[0], "alphabot")
+        self.assertEqual(_parse_explicit_target("on vitré, update hero")[0], "vitre")
+
+    def test_no_target(self):
+        self.assertEqual(_parse_explicit_target("just do a thing")[0], None)
+
+    def test_detect_project_mention(self):
+        self.assertEqual(_detect_project("the omegabot resolver is blind"), "omegabot")
+
+    def test_pinned_project_survives_classification(self):
+        # "on alphabot, is it running" — direct task, project pinned to alphabot.
+        r = classify_task("on alphabot, is the rebalance running")
+        self.assertTrue(r.is_direct)
+        self.assertEqual(r.project, "alphabot")
 
 
 def _make_ollama_json(
@@ -148,9 +200,7 @@ class TestPlannerTier1(unittest.TestCase):
         mock_run.return_value = _mock_subprocess_run(_make_ollama_json(1, "raph-ui"))
         result = classify_task("Fix typo in raph-ui dashboard footer component label")
         for step in result.pipeline:
-            self.assertIsNone(
-                step.parallel_group, f"Tier 1 step {step.role} should be sequential"
-            )
+            self.assertIsNone(step.parallel_group, f"Tier 1 step {step.role} should be sequential")
 
 
 class TestPlannerTier2(unittest.TestCase):
@@ -167,7 +217,8 @@ class TestPlannerTier2(unittest.TestCase):
         )
         self.assertEqual(result.tier, 2)
         self.assertFalse(result.is_direct)
-        self.assertEqual(result.project, "raph-ui")
+        # "raph-ui" canonicalizes to "raphael" via the project registry alias.
+        self.assertEqual(result.project, "raphael")
         self.assertTrue(result.branch_name.startswith("feature/"))
         roles = [s.role for s in result.pipeline]
         for expected in ("plan", "coder", "tester", "cleanup", "review", "deployer"):
@@ -232,9 +283,7 @@ class TestPlannerFallback(unittest.TestCase):
     @patch("planner.subprocess.run")
     def test_invalid_json_falls_back_to_tier2(self, mock_run):
         """Ollama returning non-JSON → fallback to Tier 2."""
-        mock_run.return_value = _mock_subprocess_run(
-            "I cannot classify this task, sorry."
-        )
+        mock_run.return_value = _mock_subprocess_run("I cannot classify this task, sorry.")
         result = classify_task(
             "Implement dark mode with persistent user preferences across sessions and devices"
         )
@@ -334,9 +383,7 @@ class TestScaffoldDetection(unittest.TestCase):
     def test_scaffold_project_name_basic(self):
         from planner import _scaffold_project_name
 
-        self.assertEqual(
-            _scaffold_project_name("scaffold new project: mynewapp"), "mynewapp"
-        )
+        self.assertEqual(_scaffold_project_name("scaffold new project: mynewapp"), "mynewapp")
 
     def test_scaffold_project_name_without_new(self):
         from planner import _scaffold_project_name
@@ -351,16 +398,12 @@ class TestScaffoldDetection(unittest.TestCase):
     def test_scaffold_project_name_with_hyphens(self):
         from planner import _scaffold_project_name
 
-        self.assertEqual(
-            _scaffold_project_name("scaffold new project: my-cool-api"), "my-cool-api"
-        )
+        self.assertEqual(_scaffold_project_name("scaffold new project: my-cool-api"), "my-cool-api")
 
     def test_scaffold_project_name_no_match(self):
         from planner import _scaffold_project_name
 
-        self.assertIsNone(
-            _scaffold_project_name("add dark mode to Arbiter dashboard feature")
-        )
+        self.assertIsNone(_scaffold_project_name("add dark mode to Arbiter dashboard feature"))
 
     def test_classify_scaffold_returns_scaffold_project(self):
         result = classify_task("scaffold new project: nexvault")

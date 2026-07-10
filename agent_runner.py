@@ -24,6 +24,8 @@ from typing import Optional
 
 import yaml
 
+from project_registry import resolve as resolve_project
+
 # ── Paths ──────────────────────────────────────────────────────────────────────
 TASKS_DIR = Path.home() / "raphael" / "tasks"
 RAPHBRAIN = Path.home() / "Documents" / "RaphBrain"
@@ -204,12 +206,11 @@ class AgentRunner:
         tier = run.get("tier", 2)
         route = resolve_model_route(role, tier)
 
-        # Projects that don't live under ~/Projects/
-        _PROJECT_PATHS = {
-            "hermes": "~/hermes",
-            "raph-ui": "~/raphael",
-            "raphael": "~/raphael",
-        }
+        # Resolve repo path + RaphBrain folder via the registry (single source of
+        # truth). Unknown project → best-guess path that fail-loud catches downstream.
+        proj = resolve_project(project)
+        repo_path = proj.repo if (proj and proj.repo) else f"~/Projects/{project}"
+        raphbrain_dir = (proj.raphbrain_dir if proj else None) or project.capitalize()
 
         return {
             # ── Standard Raphael task fields ──────────────────────────
@@ -224,7 +225,7 @@ class AgentRunner:
             "tier": tier,
             "model": route["model"],
             "max_turns": route["max_turns"],
-            "repo": _PROJECT_PATHS.get(project, f"~/Projects/{project}"),
+            "repo": repo_path,
             "depends_on": [],
             "handoff_required": role not in ("deployer",),
             "prompt_file": prompt_file,
@@ -232,7 +233,7 @@ class AgentRunner:
             "claimed_at": None,
             "completed_at": None,
             "output_note": output_note,
-            "raphbrain_project": project.capitalize(),
+            "raphbrain_project": raphbrain_dir,
             # ── Hermes metadata (ignored by run-agent.sh, used by RunEngine) ──
             "hermes_run_id": run["id"],
             "hermes_step_role": role,
