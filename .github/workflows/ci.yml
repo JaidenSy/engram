@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "feature/**"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pytest pyyaml requests keyring watchdog
+
+      - name: Symlink repo to ~/hermes (tests use Path.home() / "hermes")
+        run: ln -sf "$GITHUB_WORKSPACE" "$HOME/hermes"
+
+      - name: Run tests
+        run: pytest tests/ --ignore=tests/test_hermes_endpoints.py -v
+        working-directory: ${{ github.workspace }}
