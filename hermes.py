@@ -162,8 +162,10 @@ def run_task(
     log.info(f"Task: {task[:120]}...")
 
     task_file = Path.home() / "hermes" / "tasks" / f"{session_name}.md"
+    task_file.parent.mkdir(parents=True, exist_ok=True)
     task_file.write_text(f"# Hermes Task\n\n{task}\n")
     log_file = Path.home() / "hermes" / "logs" / f"{session_name}.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
 
     # Direct tasks default to sonnet — the classifier sometimes routes real work
     # here, and the cheapest model bounces on anything non-trivial.
