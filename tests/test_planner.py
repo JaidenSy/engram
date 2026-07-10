@@ -76,8 +76,9 @@ class TestExplicitTarget(unittest.TestCase):
         self.assertEqual(_detect_project("the omegabot resolver is blind"), "omegabot")
 
     def test_pinned_project_survives_classification(self):
-        # "on alphabot, is it running" — direct task, project pinned to alphabot.
-        r = classify_task("on alphabot, is the rebalance running")
+        # "check ..." hits a direct keyword → classified without Ollama (CI has none);
+        # the explicit "on alphabot" prefix pins the project.
+        r = classify_task("on alphabot, check the rebalance status")
         self.assertTrue(r.is_direct)
         self.assertEqual(r.project, "alphabot")
 
