@@ -126,6 +126,11 @@ Be specific and factual. Only include what is supported by the partial output ab
 # ponytail: single fixed ceiling — make it per-task config if tasks ever vary wildly.
 DIRECT_SAFETY_TIMEOUT_S = 7200  # 2h
 
+# Live direct tasks, so `status` can show them and `abort` can kill them.
+# session_name -> {"task", "project", "started", "proc"}
+_DIRECT_TASKS: dict = {}
+_DIRECT_LOCK = threading.Lock()
+
 
 def _resolve_claude_bin() -> str:
     """Absolute path to the claude CLI — a launchd daemon's PATH can be minimal."""
@@ -136,13 +141,16 @@ def run_task(
     task: str,
     session_name: Optional[str] = None,
     on_complete: Optional[Callable[[str], None]] = None,
+    project: Optional[str] = None,
+    cwd: Optional[str] = None,
 ) -> str:
     """Run a direct task via `claude --print` in a background thread.
 
     Returns immediately with a short ack. When the agent process exits (or is
     killed after DIRECT_SAFETY_TIMEOUT_S) the captured output is handed to
     on_complete — so the daemon never blocks and a slow task is never falsely
-    reported as timed out.
+    reported as timed out. `cwd` (a project repo) is where the agent runs;
+    `project` is echoed in the ack so a wrong route is visible immediately.
     """
     if not session_name:
         session_name = f"hermes-{int(time.time())}"
@@ -173,24 +181,44 @@ def run_task(
         str(direct_model),
         "--max-turns",
         str(direct_max_turns),
-        # acceptEdits: auto-approve file edits so the agent can do real work;
-        # bash/other tools stay gated (auto-denied in this headless run).
+        # acceptEdits auto-approves file edits; --allowed-tools pre-approves the
+        # read/inspect tools a phone status-check needs (ps, psql, git log, …) —
+        # otherwise Bash is auto-denied in this headless run and "is X running?"
+        # can't actually check anything.
         "--permission-mode",
         "acceptEdits",
+        # Variadic — keep last so it collects all four tool names.
+        "--allowed-tools",
+        "Bash",
+        "Read",
+        "Grep",
+        "Glob",
     ]
 
+    run_cwd = str(Path(cwd).expanduser()) if cwd else str(Path.home())
+
     def _worker() -> None:
+        result = ""
         try:
             proc = subprocess.Popen(
                 cmd,
-                cwd=str(Path.home()),
+                cwd=run_cwd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
             )
+            with _DIRECT_LOCK:
+                _DIRECT_TASKS[session_name] = {
+                    "task": task,
+                    "project": project,
+                    "started": time.time(),
+                    "proc": proc,
+                }
             try:
                 out, _ = proc.communicate(timeout=DIRECT_SAFETY_TIMEOUT_S)
                 result = out.strip() or "(agent produced no output)"
+                if proc.returncode and proc.returncode < 0:  # killed by a signal (abort)
+                    result = f"🛑 Aborted.\n{result}"
             except subprocess.TimeoutExpired:
                 proc.kill()
                 out, _ = proc.communicate()
@@ -202,6 +230,9 @@ def run_task(
         except Exception as exc:
             log.error(f"Direct task {session_name} failed: {exc}", exc_info=True)
             result = f"❌ Task {session_name} failed: {exc}"
+        finally:
+            with _DIRECT_LOCK:
+                _DIRECT_TASKS.pop(session_name, None)
 
         if on_complete:
             try:
@@ -212,7 +243,8 @@ def run_task(
             log.info(f"Direct task {session_name} result (no callback): {result[:200]}")
 
     threading.Thread(target=_worker, daemon=True, name=f"hermes-task-{session_name}").start()
-    return f"▶ Started {session_name} — I'll send the result when it's done."
+    tag = f" (project: {project})" if project else ""
+    return f"▶ Started {session_name}{tag} — I'll send the result when it's done."
 
 
 # ---------------------------------------------------------------------------
@@ -586,6 +618,33 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, hermes_co
         log.error(f"[orchestrate] Failed to send completion notification: {exc}")
 
 
+def _direct_tasks_summary() -> str:
+    """One line per live direct task, or '' if none."""
+    with _DIRECT_LOCK:
+        items = list(_DIRECT_TASKS.items())
+    lines = []
+    for name, info in items:
+        elapsed = int(time.time() - info["started"])
+        proj = info.get("project") or "—"
+        lines.append(
+            f"⚙️ {name} (project: {proj}) · {elapsed // 60}m{elapsed % 60:02d}s · {info['task'][:50]}"
+        )
+    return "\n".join(lines)
+
+
+def _abort_direct_tasks() -> int:
+    """Kill all live direct-task subprocesses. Returns how many were killed."""
+    with _DIRECT_LOCK:
+        procs = [(n, i["proc"]) for n, i in _DIRECT_TASKS.items()]
+    for name, proc in procs:
+        try:
+            proc.kill()
+            log.info(f"[abort] Killed direct task {name}")
+        except Exception as exc:
+            log.warning(f"[abort] Failed to kill {name}: {exc}")
+    return len(procs)
+
+
 def orchestrate_task(task_text: str, config: dict) -> str:
     """
     Route an incoming task through the planner.
@@ -601,18 +660,23 @@ def orchestrate_task(task_text: str, config: dict) -> str:
     # Abort shortcut — intercept before planner so a rate-limited/stuck run
     # can always be cancelled without spinning up another pipeline.
     if task_text.strip().lower().startswith("abort"):
+        killed = _abort_direct_tasks()
         engine = RunEngine()
         active = engine.get_active_run()
+        msgs = []
+        if killed:
+            msgs.append(f"🛑 Killed {killed} direct task(s).")
         if active:
             try:
                 engine.abort_run(active["id"])
-                project = active.get("project", "unknown")
-                branch = active.get("branch", "")
-                return f"🛑 Aborted run {active['id']} — {project} / {branch}"
+                msgs.append(
+                    f"🛑 Aborted run {active['id']} — "
+                    f"{active.get('project', 'unknown')} / {active.get('branch', '')}"
+                )
             except Exception as exc:
                 log.warning(f"[orchestrate] abort_run failed: {exc}")
-                return f"⚠️ Abort failed: {exc}"
-        return "ℹ️ No active run to abort."
+                msgs.append(f"⚠️ Abort failed: {exc}")
+        return "\n".join(msgs) if msgs else "ℹ️ Nothing active to abort."
 
     # Status shortcut — fast local read of run state. Must intercept before the
     # planner, else "status" classifies as a direct task and spawns a 30-min
@@ -625,6 +689,7 @@ def orchestrate_task(task_text: str, config: dict) -> str:
     ):
         engine = RunEngine()
         active = engine.get_active_run()
+        direct = _direct_tasks_summary()
         if active:
             steps = active.get("pipeline", [])
             done = sum(1 for s in steps if s.get("status") == "done")
@@ -635,20 +700,23 @@ def orchestrate_task(task_text: str, config: dict) -> str:
             started = active.get("created_at") or ""
             now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
             elapsed = _format_duration(started, now) if started else "?"
-            return (
+            pipeline_status = (
                 f"🟢 {active.get('project', '?')} [Tier {active.get('tier', '?')}] "
                 f"run {active['id']}\n"
                 f"Step: {cur} ({done}/{len(steps)} done) · {elapsed}\n"
                 f"Branch: {active.get('branch', '')}"
             )
-        recent = engine.list_runs(limit=1)
-        if recent:
-            r = recent[0]
-            return (
-                f"⚪️ No active run.\n"
-                f"Last: {r.get('project', '?')} run {r.get('id', '?')} → {r.get('status', '?')}"
-            )
-        return "⚪️ No active run."
+        else:
+            recent = engine.list_runs(limit=1)
+            if recent:
+                r = recent[0]
+                pipeline_status = (
+                    f"⚪️ No active pipeline run.\n"
+                    f"Last: {r.get('project', '?')} run {r.get('id', '?')} → {r.get('status', '?')}"
+                )
+            else:
+                pipeline_status = "⚪️ No active pipeline run."
+        return f"{pipeline_status}\n\n{direct}".rstrip() if direct else pipeline_status
 
     # Discovery commands — help Jaiden drive from a phone without remembering the grammar.
     _cmd = task_text.strip().lower().rstrip("?")
@@ -678,7 +746,13 @@ def orchestrate_task(task_text: str, config: dict) -> str:
     # Direct task — runs in the background; result is sent back on completion.
     if result.is_direct:
         log.info("[orchestrate] Direct task — routing to run_task()")
-        return run_task(task_text, on_complete=lambda r: _send_reply(config, r[:4096]))
+        proj = resolve_project(result.project)
+        return run_task(
+            task_text,
+            on_complete=lambda r: _send_reply(config, r[:4096]),
+            project=result.project if proj else None,
+            cwd=(proj.repo if (proj and proj.repo) else None),
+        )
 
     # Pipeline task — fail loud on an unknown project rather than dispatching an
     # agent that would silently run in $HOME against nothing.

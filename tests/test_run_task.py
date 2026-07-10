@@ -12,6 +12,7 @@ Covers the two behaviors that replaced the old tmux + HERMES_DONE sentinel +
 import subprocess
 import sys
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -27,6 +28,7 @@ class _FakeProc:
         self._output = output
         self._timeout_first = timeout_first
         self._calls = 0
+        self.returncode = 0
         self.kill = MagicMock()
 
     def communicate(self, timeout=None):
@@ -79,6 +81,37 @@ class TestRunTask(unittest.TestCase):
         fake.kill.assert_called_once()  # child is actually killed, not leaked
         self.assertIn("Killed after", result)
         self.assertIn("partial", result)
+
+
+class TestDirectTaskControl(unittest.TestCase):
+    """Live direct tasks are visible to `status` and killable by `abort`."""
+
+    def tearDown(self):
+        hermes._DIRECT_TASKS.clear()
+
+    def test_summary_lists_task(self):
+        hermes._DIRECT_TASKS["hermes-t1"] = {
+            "task": "check the rebalance",
+            "project": "alphabot",
+            "started": time.time() - 65,
+            "proc": MagicMock(),
+        }
+        s = hermes._direct_tasks_summary()
+        self.assertIn("hermes-t1", s)
+        self.assertIn("alphabot", s)
+        self.assertIn("1m", s)  # ~65s elapsed
+
+    def test_abort_kills_all(self):
+        proc = MagicMock()
+        hermes._DIRECT_TASKS["hermes-t2"] = {
+            "task": "x",
+            "project": None,
+            "started": time.time(),
+            "proc": proc,
+        }
+        n = hermes._abort_direct_tasks()
+        self.assertEqual(n, 1)
+        proc.kill.assert_called_once()
 
 
 if __name__ == "__main__":
