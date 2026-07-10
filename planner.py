@@ -143,6 +143,18 @@ ACTION_KEYWORDS = [
     "update",
     "migrate",
     "deploy",
+    # collision-safe additions (avoid "run"/"test" — substring-match "running"/"latest")
+    "debug",
+    "investigate",
+    "rename",
+    "remove",
+    "delete",
+    "merge",
+    "revert",
+    "commit",
+    "push",
+    "optimize",
+    "replace",
 ]
 
 # ---------------------------------------------------------------------------
@@ -151,11 +163,7 @@ ACTION_KEYWORDS = [
 
 OLLAMA_SYSTEM_PROMPT = (
     "You are a task classification assistant for a developer's personal orchestration system.\n"
-    "Your job is to read a development task and output ONLY a JSON object — no prose, no markdown fences, no explanation.\n"
-    "\n"
-    "Privacy rule: Do NOT include any of these words in your output JSON if they appear in the task: "
-    "arbiter, investor, fundraising, strategy, supplier, credentials, api key, secret, private, confidential. "
-    'Replace them with "project" or omit entirely.'
+    "Your job is to read a development task and output ONLY a JSON object — no prose, no markdown fences, no explanation."
 )
 
 OLLAMA_USER_PROMPT = """Classify this task and output ONLY valid JSON matching this exact schema:
@@ -259,16 +267,16 @@ def _has_privacy_keywords(text: str) -> bool:
 
 
 def _is_direct_task(task_text: str) -> bool:
-    """
-    Return True if this looks like a status query or short lookup that
-    doesn't require a full pipeline run.
+    """Direct only when a status/lookup keyword matches AND no action verb does.
 
-    Action keywords always force a pipeline — "fix the login bug" is short
-    but is real work, not a lookup. Tasks with no action keywords (status
-    queries, questions, lookups) are direct.
+    Everything else falls through to Ollama, which returns its own is_direct — so
+    ambiguous work ("debug the rebalance", "investigate the null dates") gets
+    judged instead of defaulting to a lookup that then can't do anything.
     """
     lower = task_text.strip().lower()
-    return not any(kw in lower for kw in ACTION_KEYWORDS)
+    has_action = any(kw in lower for kw in ACTION_KEYWORDS)
+    has_direct = any(kw in lower for kw in DIRECT_KEYWORDS)
+    return has_direct and not has_action
 
 
 # ---------------------------------------------------------------------------
@@ -379,20 +387,15 @@ def classify_task(task_text: str) -> PlannerResult:
             raw_ollama_response="",
         )
 
-    # Step 2: Privacy keyword gate — do not send sensitive content to Ollama
-    if _has_privacy_keywords(task_text):
-        log.warning(
-            f"[planner] Privacy keywords found in task — bypassing Ollama, using fallback: "
-            f"{task_text[:60]!r}"
-        )
-        return _fallback_result(task_text, forced_project)
-
-    # Step 3: Build prompt and call Ollama
-    sanitized_task = _sanitize_for_ollama(task_text)
+    # Step 2: Build prompt and call Ollama. No privacy gate/sanitizer — Ollama runs
+    # on localhost (nothing leaves the machine) and redacting "arbiter" only wrecked
+    # classification (forced Tier-2 fallback + an unresolvable project). The
+    # PRIVACY_KEYWORDS / _sanitize_for_ollama helpers are kept dormant for the day a
+    # genuinely remote classifier is wired in.
     projects_hint = 'Known project names (pick one for "project", else "general"): ' + ", ".join(
         project_names()
     )
-    user_prompt = OLLAMA_USER_PROMPT.format(task_text=sanitized_task)
+    user_prompt = OLLAMA_USER_PROMPT.format(task_text=task_text)
     full_prompt = f"{OLLAMA_SYSTEM_PROMPT}\n\n{projects_hint}\n\n{user_prompt}"
 
     try:

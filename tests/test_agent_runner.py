@@ -87,9 +87,7 @@ class TestAgentRunnerDispatch(unittest.TestCase):
         self.ar_mod.TASKS_DIR = self._orig_tasks_dir
         self._tmpdir.cleanup()
 
-    def _dispatch_with_mock_tmux(
-        self, step, run, task_description="Test task description"
-    ):
+    def _dispatch_with_mock_tmux(self, step, run, task_description="Test task description"):
         """Helper: dispatch_step with tmux subprocess mocked out."""
         with patch.object(self.runner, "_spawn_run_agent") as mock_spawn:
             mock_spawn.return_value = None
@@ -331,26 +329,23 @@ class TestAgentRunnerTargetBranch(unittest.TestCase):
         self.ar_mod.TASKS_DIR = self._orig_tasks_dir
         self._tmpdir.cleanup()
 
-    def test_hermes_project_targets_main(self):
-        """Projects hermes/raph-ui/raphael target main branch."""
+    @patch("agent_runner.pr_base", return_value="main")
+    def test_target_branch_is_repo_default_main(self, _pb):
+        """Target branch = the repo's default branch (origin HEAD) via the registry."""
         run = _make_run(project="hermes")
         step = run["pipeline"][0]
         with patch.object(self.runner, "_spawn_run_agent"):
-            task_id = self.runner.dispatch_step(
-                step=step, run=run, task_description="test"
-            )
+            task_id = self.runner.dispatch_step(step=step, run=run, task_description="test")
         prompt = (self.tmp_tasks / f"{task_id}-prompt.md").read_text()
-        # Target branch should be 'main' for hermes project
         self.assertIn("main", prompt)
 
-    def test_arbiter_project_targets_develop(self):
-        """Non-hermes/raph-ui projects target develop branch."""
-        run = _make_run(project="nexvault")
+    @patch("agent_runner.pr_base", return_value="develop")
+    def test_target_branch_is_repo_default_develop(self, _pb):
+        """A repo whose default is develop (e.g. arbiter) targets develop."""
+        run = _make_run(project="arbiter")
         step = run["pipeline"][0]
         with patch.object(self.runner, "_spawn_run_agent"):
-            task_id = self.runner.dispatch_step(
-                step=step, run=run, task_description="test"
-            )
+            task_id = self.runner.dispatch_step(step=step, run=run, task_description="test")
         prompt = (self.tmp_tasks / f"{task_id}-prompt.md").read_text()
         self.assertIn("develop", prompt)
 

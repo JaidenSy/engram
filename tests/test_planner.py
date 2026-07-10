@@ -251,30 +251,19 @@ class TestPlannerTier3(unittest.TestCase):
         self.assertEqual(research_step.parallel_group, architect_step.parallel_group)
 
 
-class TestPlannerPrivacyKeyword(unittest.TestCase):
-    """Privacy-keyword tasks must bypass Ollama entirely."""
+class TestPlannerNoPrivacyGate(unittest.TestCase):
+    """Ollama runs locally, so 'arbiter'/'credentials' tasks classify normally now —
+    the old gate that forced them into a Tier-2 fallback is gone."""
 
     @patch("planner.subprocess.run")
-    def test_privacy_task_bypasses_ollama(self, mock_run):
-        """Task containing 'arbiter' should not call Ollama, should return fallback result."""
+    def test_arbiter_task_reaches_ollama(self, mock_run):
+        mock_run.return_value = _mock_subprocess_run(_make_ollama_json(2, "arbiter"))
         result = classify_task(
-            "Implement new investor dashboard feature for Arbiter with JWT authentication and deployment"
+            "Implement a new investor dashboard feature for Arbiter with JWT auth and deployment"
         )
-        mock_run.assert_not_called()
-        # Fallback is Tier 2
-        self.assertEqual(result.tier, 2)
-        self.assertFalse(result.is_direct)
-        self.assertEqual(result.raw_ollama_response, "FALLBACK")
-
-    @patch("planner.subprocess.run")
-    def test_credentials_keyword_bypasses_ollama(self, mock_run):
-        """Task containing 'credentials' bypasses Ollama."""
-        result = classify_task(
-            "Update the API credentials rotation script and implement automated key refresh"
-        )
-        mock_run.assert_not_called()
-        self.assertEqual(result.tier, 2)
-        self.assertEqual(result.raw_ollama_response, "FALLBACK")
+        mock_run.assert_called()  # Ollama WAS called — no bypass
+        self.assertEqual(result.project, "arbiter")
+        self.assertNotEqual(result.raw_ollama_response, "FALLBACK")
 
 
 class TestPlannerFallback(unittest.TestCase):

@@ -24,7 +24,7 @@ from typing import Optional
 
 import yaml
 
-from project_registry import resolve as resolve_project
+from project_registry import pr_base, resolve as resolve_project
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 TASKS_DIR = Path.home() / "raphael" / "tasks"
@@ -153,8 +153,10 @@ class AgentRunner:
         output_note = f"Projects/{project}/agents/hermes-{task_id}-{role}-output.md"
         prompt_file = TASKS_DIR / f"{task_id}-prompt.md"
 
-        # Determine PR target branch for deployer role
-        target_branch = "main" if project in ("hermes", "raph-ui", "raphael") else "develop"
+        # PR target branch = the repo's actual default branch (origin HEAD), via the
+        # registry. Fixes the old hardcoded "develop" that was wrong for most repos
+        # (alphabot/kirnu/vitre use main; arbiter really is develop).
+        target_branch = pr_base(project) or "main"
 
         # Build and write prompt
         prompt_md = self._build_prompt(
