@@ -98,10 +98,12 @@ models:
   #   opus   → judgment steps where a miss is expensive (review, architecture)
   #   fable  → tier-3 only: deepest reasoning for system design + final review
   agent_models:
-    # Direct tasks (status checks / lookups — no pipeline)
+    # Direct tasks (status checks / lookups — no pipeline).
+    # sonnet, not haiku: the classifier sometimes routes real work here and haiku
+    # bounces on anything non-trivial (e.g. asks for a URL and quits).
     direct:
-      model: "haiku"
-      max_turns: 15
+      model: "sonnet"
+      max_turns: 30
 
     # Per-role defaults (all tiers)
     roles:

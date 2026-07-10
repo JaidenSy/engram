@@ -13,12 +13,12 @@ import json
 import imaplib
 import email
 import smtplib
-import shlex
+import shutil
 import keyring
 import requests
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from email.mime.text import MIMEText
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -120,79 +120,104 @@ Be specific and factual. Only include what is supported by the partial output ab
         return ""
 
 
-def run_task(task: str, session_name: Optional[str] = None) -> str:
-    """Spawn a tmux session running Claude Code with the given task."""
+# Hard safety kill for a direct task's agent subprocess. Real work finishes in
+# minutes; this only backstops a hung/looping agent so it can't run forever.
+# ponytail: single fixed ceiling — make it per-task config if tasks ever vary wildly.
+DIRECT_SAFETY_TIMEOUT_S = 7200  # 2h
+
+# Injected into every direct-task prompt so the agent can locate work without
+# asking follow-up questions it can't receive (Hermes is fire-and-forget).
+# Keep in sync with ~/.claude/CLAUDE.md active projects.
+PROJECT_MAP = """Local projects (use these paths directly — do not ask for URLs/paths):
+- portfolio: ~/Projects/portfolio/index.html  (static one-file site; serve: python3 -m http.server 8090)
+- arbiter: ~/Projects/arbiter
+- alphabot: ~/Projects/alphabot
+- omegabot: ~/Projects/omegabot
+- finance-tracker: ~/Projects/finance-tracker
+- hermes: ~/hermes
+- RaphBrain notes vault: ~/Documents/RaphBrain"""
+
+
+def _resolve_claude_bin() -> str:
+    """Absolute path to the claude CLI — a launchd daemon's PATH can be minimal."""
+    return shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude")
+
+
+def run_task(
+    task: str,
+    session_name: Optional[str] = None,
+    on_complete: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Run a direct task via `claude --print` in a background thread.
+
+    Returns immediately with a short ack. When the agent process exits (or is
+    killed after DIRECT_SAFETY_TIMEOUT_S) the captured output is handed to
+    on_complete — so the daemon never blocks and a slow task is never falsely
+    reported as timed out.
+    """
     if not session_name:
         session_name = f"hermes-{int(time.time())}"
 
-    log.info(f"Spawning task in tmux session: {session_name}")
+    log.info(f"Spawning direct task: {session_name}")
     log.info(f"Task: {task[:120]}...")
 
     task_file = Path.home() / "hermes" / "tasks" / f"{session_name}.md"
     task_file.write_text(f"# Hermes Task\n\n{task}\n")
-
     log_file = Path.home() / "hermes" / "logs" / f"{session_name}.log"
 
-    safe_task_file = shlex.quote(str(task_file))
-    safe_log_file = shlex.quote(str(log_file))
-
-    # Direct tasks are status checks / lookups — route to the cheap model.
-    # Configurable via models.agent_models.direct in config.yaml.
+    # Direct tasks default to sonnet — the classifier sometimes routes real work
+    # here, and the cheapest model bounces on anything non-trivial.
     try:
         direct_cfg = load_config().get("models", {}).get("agent_models", {}).get("direct", {})
     except Exception:
         direct_cfg = {}
-    direct_model = direct_cfg.get("model", "haiku")
-    direct_max_turns = direct_cfg.get("max_turns", 15)
-
-    shell_cmd = (
-        f'claude --print "$(cat {safe_task_file})" '
-        f"--model {shlex.quote(str(direct_model))} --max-turns {int(direct_max_turns)} "
-        f"2>&1 | tee {safe_log_file}; echo 'HERMES_DONE' >> {safe_log_file}"
-    )
+    direct_model = direct_cfg.get("model", "sonnet")
+    direct_max_turns = int(direct_cfg.get("max_turns", 30))
 
     cmd = [
-        "tmux",
-        "new-session",
-        "-d",
-        "-s",
-        session_name,
-        "-x",
-        "220",
-        "-y",
-        "50",
-        shell_cmd,
+        _resolve_claude_bin(),
+        "--print",
+        f"{PROJECT_MAP}\n\n---\n\n{task}",
+        "--model",
+        str(direct_model),
+        "--max-turns",
+        str(direct_max_turns),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
 
-    if result.returncode != 0:
-        log.error(f"Failed to spawn tmux session: {result.stderr}")
-        return f"ERROR: {result.stderr}"
+    def _worker() -> None:
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(Path.home()),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            try:
+                out, _ = proc.communicate(timeout=DIRECT_SAFETY_TIMEOUT_S)
+                result = out.strip() or "(agent produced no output)"
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                out, _ = proc.communicate()
+                hrs = DIRECT_SAFETY_TIMEOUT_S // 3600
+                log.warning(f"Direct task hard-killed after {hrs}h: {session_name}")
+                result = f"{(out or '').strip()}\n\n⚠️ Killed after {hrs}h safety timeout."
+            log_file.write_text(result)
+            log.info(f"Direct task complete: {session_name}")
+        except Exception as exc:
+            log.error(f"Direct task {session_name} failed: {exc}", exc_info=True)
+            result = f"❌ Task {session_name} failed: {exc}"
 
-    timeout = 1800
-    elapsed = 0
-    while elapsed < timeout:
-        time.sleep(5)
-        elapsed += 5
-        if log_file.exists():
-            content = log_file.read_text()
-            if "HERMES_DONE" in content:
-                log.info(f"Task complete: {session_name}")
-                return content.replace("HERMES_DONE", "").strip()
+        if on_complete:
+            try:
+                on_complete(result)
+            except Exception as exc:
+                log.error(f"on_complete callback failed for {session_name}: {exc}")
+        else:
+            log.info(f"Direct task {session_name} result (no callback): {result[:200]}")
 
-    # Timeout — use Ollama to write a handoff so work isn't lost
-    log.warning(f"Task timed out: {session_name} — triggering Ollama handoff writer")
-    partial = log_file.read_text() if log_file.exists() else "(no output captured)"
-    handoff_path = write_handoff_via_ollama(task, session_name, partial)
-
-    if handoff_path:
-        return (
-            f"Task {session_name} timed out after {timeout}s. "
-            f"Handoff written to: {handoff_path} — resume when Claude Code resets."
-        )
-    return (
-        f"Task {session_name} timed out after {timeout}s. Check tmux: tmux attach -t {session_name}"
-    )
+    threading.Thread(target=_worker, daemon=True, name=f"hermes-task-{session_name}").start()
+    return f"▶ Started {session_name} — I'll send the result when it's done."
 
 
 # ---------------------------------------------------------------------------
@@ -533,9 +558,11 @@ def orchestrate_task(task_text: str, config: dict) -> str:
     """
     Route an incoming task through the planner.
 
-    - Direct tasks (status checks, short queries): forwarded to run_task() synchronously.
-    - Pipeline tasks: create a run file, start the engine in a daemon thread,
-      return a start-confirmation string immediately (sent as the reply).
+    Both paths return a start-confirmation string immediately and report the
+    real result later on their own channel:
+    - Direct tasks: run_task() runs the agent in a background thread and sends
+      the result via on_complete when the process exits.
+    - Pipeline tasks: create a run file, start the engine in a daemon thread.
 
     config is the loaded config.yaml dict — needed for notification channel.
     """
@@ -602,10 +629,10 @@ def orchestrate_task(task_text: str, config: dict) -> str:
         log.info(f"[orchestrate] Scaffold task — project={result.scaffold_project!r}")
         return run_scaffold(result.scaffold_project)
 
-    # Direct task — use existing synchronous run_task()
+    # Direct task — runs in the background; result is sent back on completion.
     if result.is_direct:
         log.info("[orchestrate] Direct task — routing to run_task()")
-        return run_task(task_text)
+        return run_task(task_text, on_complete=lambda r: _send_reply(config, r[:4096]))
 
     # Pipeline task
     engine = RunEngine()
@@ -891,8 +918,10 @@ class EmailPoller:
                 log.info(f"Received task via email: {task[:80]}...")
                 mail.store(num, "+FLAGS", "\\Seen")
 
-                result = run_task(task)
-                notify(self.hermes_cfg, "Task complete", result[:2000])
+                run_task(
+                    task,
+                    on_complete=lambda r: notify(self.hermes_cfg, "Task complete", r[:2000]),
+                )
 
             mail.logout()
         except Exception as e:
@@ -909,8 +938,11 @@ class FileWatcher(FileSystemEventHandler):
         path = Path(event.src_path)
         log.info(f"Task file detected: {path.name}")
         task = path.read_text().strip()
-        result = run_task(task, session_name=path.stem)
-        notify(self.hermes_cfg, f"Task complete: {path.stem}", result[:2000])
+        run_task(
+            task,
+            session_name=path.stem,
+            on_complete=lambda r: notify(self.hermes_cfg, f"Task complete: {path.stem}", r[:2000]),
+        )
         path.unlink()
 
 
@@ -947,8 +979,10 @@ class WebhookListener:
                 self.end_headers()
                 self.wfile.write(b'{"status": "accepted"}')
 
-                result = run_task(task)
-                notify(hermes_cfg, "Task complete", result[:2000])
+                run_task(
+                    task,
+                    on_complete=lambda r: notify(hermes_cfg, "Task complete", r[:2000]),
+                )
 
             def log_message(self, *args):
                 pass
