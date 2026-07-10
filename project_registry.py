@@ -142,10 +142,30 @@ def build_registry(
     return reg
 
 
+_TEST_REGISTRY: Optional[dict] = None
+
+
 @lru_cache(maxsize=1)
-def get_registry() -> dict:
-    """Cached registry built from the real filesystem (once per process)."""
+def _cached_registry() -> dict:
     return build_registry()
+
+
+def get_registry() -> dict:
+    """Cached registry built from the real filesystem (once per process).
+
+    Tests install a fixed registry via set_test_registry() so they don't depend
+    on the host's ~/Projects (which doesn't exist on CI).
+    """
+    if _TEST_REGISTRY is not None:
+        return _TEST_REGISTRY
+    return _cached_registry()
+
+
+def set_test_registry(reg: Optional[dict]) -> None:
+    """Override the registry for tests; pass None to restore filesystem scanning."""
+    global _TEST_REGISTRY
+    _TEST_REGISTRY = reg
+    pr_base.cache_clear()
 
 
 def resolve(name: str) -> Optional[Project]:

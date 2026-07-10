@@ -28,8 +28,10 @@ class TestRegistry(unittest.TestCase):
         for n in ("AlphaBot", "FinanceTracker", "Vitré", "Jacuzzi", "handoffs"):
             (self.rb / n).mkdir()
         self.reg = pr.build_registry(self.projects, self.rb, extra_repos={}, detect_pr_base=False)
+        pr.set_test_registry(self.reg)  # so resolve()/aliases work without the real FS
 
     def tearDown(self):
+        pr.set_test_registry(None)
         self._tmp.cleanup()
 
     def _get(self, name):
@@ -63,18 +65,12 @@ class TestRegistry(unittest.TestCase):
         self.assertEqual(pr._norm("FinanceTracker"), "financetracker")
         self.assertEqual(pr._norm("finance-tracker"), "financetracker")
 
-
-class TestRealRegistrySmoke(unittest.TestCase):
-    """A light check against the real filesystem — arbiter must resolve to a repo."""
-
-    def test_arbiter_resolves(self):
-        p = pr.resolve("arbiter")
-        self.assertIsNotNone(p)
-        self.assertTrue(p.repo)
-
-    def test_alias_and_accent_on_real_fs(self):
-        self.assertIs(pr.resolve("Vitré"), pr.resolve("vitre"))
-        self.assertIs(pr.resolve("raph-ui"), pr.resolve("raphael"))
+    def test_resolve_via_override(self):
+        # resolve() reads the installed test registry, not the host FS.
+        self.assertTrue(pr.resolve("arbiter").repo)
+        self.assertIs(pr.resolve("Vitré"), pr.resolve("vitre"))  # accent
+        self.assertIs(pr.resolve("mira"), pr.resolve("vitre"))  # alias
+        self.assertIsNone(pr.resolve("nope-not-a-project"))
 
 
 if __name__ == "__main__":

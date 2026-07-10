@@ -30,6 +30,31 @@ from planner import (
     _parse_explicit_target,
     _detect_project,
 )
+import project_registry as _pr
+
+_TMP_REG = None
+
+
+def setUpModule():
+    """Install a deterministic project registry so planner routing tests don't
+    depend on the host's ~/Projects (absent on CI)."""
+    global _TMP_REG
+    import tempfile
+
+    _TMP_REG = tempfile.TemporaryDirectory()
+    root = Path(_TMP_REG.name)
+    projects, rb = root / "Projects", root / "RaphBrain"
+    projects.mkdir()
+    rb.mkdir()
+    for n in ("arbiter", "alphabot", "vitre", "omegabot", "hermes", "raphael"):
+        (projects / n).mkdir()
+    (rb / "Vitré").mkdir()
+    _pr.set_test_registry(_pr.build_registry(projects, rb, extra_repos={}, detect_pr_base=False))
+
+
+def tearDownModule():
+    _pr.set_test_registry(None)
+    _TMP_REG.cleanup()
 
 
 class TestExplicitTarget(unittest.TestCase):
