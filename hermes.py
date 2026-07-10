@@ -859,10 +859,12 @@ class TelegramPoller:
 
     def poll(self):
         try:
+            # Long-poll: getUpdates blocks up to 25s and returns the moment a message
+            # arrives — near-instant pickup, far fewer requests than short-poll + sleep.
             resp = requests.get(
                 f"https://api.telegram.org/bot{self.token}/getUpdates",
-                params={"offset": self.offset, "timeout": 0},
-                timeout=15,
+                params={"offset": self.offset, "timeout": 25},
+                timeout=30,
             )
             if not resp.ok:
                 log.error(f"Telegram getUpdates failed: {_redact_token(resp.text, self.token)}")
@@ -874,11 +876,7 @@ class TelegramPoller:
                 self._save_offset(self.offset)
 
                 msg = update.get("message", {})
-                if not msg:
-                    continue
-
-                # Only process messages from Jaiden's chat
-                if msg.get("chat", {}).get("id") != self.chat_id:
+                if not msg or msg.get("chat", {}).get("id") != self.chat_id:
                     continue
 
                 text = msg.get("text", "").strip()
@@ -886,16 +884,35 @@ class TelegramPoller:
                     continue
 
                 task = text[len(self.prefix) :].strip() if text.startswith(self.prefix) else text
+                self._journal(update["update_id"], task)
                 log.info(f"Telegram task: {task[:80]}...")
-                try:
-                    reply = orchestrate_task(task, self.hermes_cfg)
-                    self._reply(reply[:4096])
-                except Exception as task_exc:
-                    log.error(f"Task execution error: {task_exc}", exc_info=True)
-                    self._reply(f"❌ Error: {task_exc}")
+                # Process off the poll loop: a slow classification (Ollama ~15-30s)
+                # must not freeze pickup of the next message. Ack immediately.
+                self._reply("👀 on it")
+                threading.Thread(
+                    target=self._process, args=(task,), daemon=True, name="hermes-tg-task"
+                ).start()
 
         except Exception as exc:
             log.error(f"Telegram poll error: {_redact_token(str(exc), self.token)}")
+
+    def _process(self, task: str):
+        try:
+            reply = orchestrate_task(task, self.hermes_cfg)
+            self._reply(reply[:4096])
+        except Exception as task_exc:
+            log.error(f"Task execution error: {task_exc}", exc_info=True)
+            self._reply(f"❌ Error: {task_exc}")
+
+    def _journal(self, update_id: int, task: str):
+        """Append the raw message before processing so a daemon crash mid-task
+        leaves a trace instead of silently losing it (offset already advanced)."""
+        try:
+            jpath = Path.home() / "hermes" / "logs" / "telegram-journal.log"
+            with jpath.open("a") as f:
+                f.write(f"{update_id}\t{task}\n")
+        except Exception:
+            pass
 
     def _reply(self, message: str):
         _send_telegram(self.token, self.chat_id, message)
@@ -1137,7 +1154,7 @@ def main():
         poller = TelegramPoller(config)
         while True:
             poller.poll()
-            time.sleep(config["trigger"]["telegram"]["poll_interval_seconds"])
+            time.sleep(1)  # poll() long-polls up to 25s; this is just a loop breather
 
     elif method == "imessage":
         log.info("Trigger: iMessage polling")

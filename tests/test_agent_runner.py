@@ -193,6 +193,24 @@ class TestAgentRunnerDispatch(unittest.TestCase):
             # First arg should be the task_id
             self.assertEqual(call_args[0][0], task_id)
 
+    def test_next_task_id_concurrent_unique(self):
+        """Parallel-group dispatches must not collide on the same YYYY-MM-DD-NNN."""
+        import threading as _t
+
+        ids, lock = [], _t.Lock()
+
+        def grab():
+            tid = self.runner._next_task_id()
+            with lock:
+                ids.append(tid)
+
+        threads = [_t.Thread(target=grab) for _ in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(len(ids), len(set(ids)), f"collision: {ids}")
+
 
 class TestAgentRunnerHelpers(unittest.TestCase):
     """Test helper methods."""

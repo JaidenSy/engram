@@ -18,6 +18,7 @@ import json
 import logging
 import re
 import subprocess
+import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -112,6 +113,9 @@ INLINE_ROLE_TEMPLATES: dict[str, str] = {
 }
 
 log = logging.getLogger("hermes")
+
+# Serializes task-id generation so concurrent parallel-group dispatches don't collide.
+_ID_LOCK = threading.Lock()
 
 
 class AgentRunner:
@@ -357,9 +361,14 @@ class AgentRunner:
         (LOG_FILE=$LOG_DIR/$(date +%Y-%m-%d)-${TASK_ID}.log).
         """
         today = date.today().isoformat()
-        existing = list(TASKS_DIR.glob(f"{today}-*.json"))
-        seq = len(existing)
-        return f"{today}-{seq:03d}"
+        # Lock + immediately reserve the id (placeholder file) so two parallel-group
+        # steps (Tier 3 research+architect) can't compute the same NNN and clobber
+        # each other's task JSON. dispatch_step overwrites the placeholder right after.
+        with _ID_LOCK:
+            seq = len(list(TASKS_DIR.glob(f"{today}-*.json")))
+            task_id = f"{today}-{seq:03d}"
+            (TASKS_DIR / f"{task_id}.json").write_text("{}")
+        return task_id
 
     # ------------------------------------------------------------------
     # tmux spawning
