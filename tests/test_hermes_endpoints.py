@@ -18,6 +18,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+import pytest
+
+# server.py (Mission Control UI) lives in a sibling repo ~/raphael/ui/ and needs
+# fastapi. Skip cleanly where it's not installed (Hermes' own venv, some CI)
+# rather than erroring out the whole collection.
+pytest.importorskip("fastapi")
+
 # server.py is in ~/raphael/ui/
 SERVER_DIR = Path.home() / "raphael" / "ui"
 sys.path.insert(0, str(SERVER_DIR))

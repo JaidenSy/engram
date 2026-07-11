@@ -23,10 +23,9 @@ sys.path.insert(0, str(HERMES_DIR))
 
 from planner import (
     classify_task,
-    _has_privacy_keywords,
     _fallback_result,
     _extract_json,
-    _sanitize_for_ollama,
+    _is_nondev_task,
     _parse_explicit_target,
     _detect_project,
 )
@@ -173,6 +172,26 @@ class TestPlannerDirectTask(unittest.TestCase):
             result = classify_task(task)
             mock_run.assert_not_called()
         self.assertTrue(result.is_direct)
+
+    def test_nondev_task_routes_direct_no_ollama(self):
+        """Sales/outreach work must NOT enter a code pipeline (the 2026-07-11 bug):
+        it routes to a single general agent (is_direct), never plan→coder→deployer."""
+        task = "Utilize your skills to get me potential customers to warm call for my services"
+        with patch("planner.subprocess.run") as mock_run:
+            result = classify_task(task)
+            mock_run.assert_not_called()
+        self.assertTrue(result.is_direct)
+        self.assertEqual(result.tier, 0)
+        self.assertEqual(result.pipeline, [])
+
+    def test_is_nondev_precision(self):
+        # Non-code work → caught here.
+        self.assertTrue(_is_nondev_task("get me potential customers to warm call"))
+        self.assertTrue(_is_nondev_task("draft a blog post about MCP"))
+        # Real code tasks that merely share adjacent words → NOT caught (go to Ollama).
+        self.assertFalse(_is_nondev_task("fix the bug that leads to a crash"))
+        self.assertFalse(_is_nondev_task("build the marketing page in React"))
+        self.assertFalse(_is_nondev_task("migrate customers to the new postgres schema"))
 
 
 class TestPlannerTier1(unittest.TestCase):
@@ -347,17 +366,6 @@ class TestPlannerHelpers(unittest.TestCase):
     def test_extract_json_raises_on_no_json(self):
         with self.assertRaises(ValueError):
             _extract_json("No JSON here at all, just text.")
-
-    def test_sanitize_removes_privacy_keywords(self):
-        text = "Update arbiter with new investor strategy and credentials rotation"
-        sanitized = _sanitize_for_ollama(text)
-        for kw in ("arbiter", "investor", "strategy", "credentials"):
-            self.assertNotIn(kw.lower(), sanitized.lower())
-
-    def test_has_privacy_keywords_case_insensitive(self):
-        self.assertTrue(_has_privacy_keywords("ARBITER is great"))
-        self.assertTrue(_has_privacy_keywords("My investor meeting"))
-        self.assertFalse(_has_privacy_keywords("hello world"))
 
     def test_fallback_result_always_tier2(self):
         r = _fallback_result("some arbitrary task text")

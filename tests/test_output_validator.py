@@ -20,7 +20,11 @@ from unittest.mock import patch
 HERMES_DIR = Path.home() / "hermes"
 sys.path.insert(0, str(HERMES_DIR))
 
-from output_validator import validate_step_output, ROLE_REQUIREMENTS
+from output_validator import (
+    validate_step_output,
+    STRICT_ROLE_REQUIREMENTS,
+    CONTENT_ROLES,
+)
 
 
 class TestValidateStepOutput(unittest.TestCase):
@@ -141,8 +145,7 @@ class TestValidateStepOutput(unittest.TestCase):
 
     def test_deployer_missing_status_fails(self):
         content = (
-            "## Deployer Output\n\n"
-            "**PR URL:** https://github.com/JaidenSy/hermes/pull/6\n" * 3
+            "## Deployer Output\n\n**PR URL:** https://github.com/JaidenSy/hermes/pull/6\n" * 3
         )
         note = self._write_note("Projects/x/agents/deployer3.md", content)
         valid, reason = validate_step_output("deployer", note)
@@ -151,8 +154,7 @@ class TestValidateStepOutput(unittest.TestCase):
 
     def test_deployer_missing_header_fails(self):
         content = (
-            "**PR URL:** https://github.com/JaidenSy/hermes/pull/7\n\n**Status:** opened\n"
-            * 3
+            "**PR URL:** https://github.com/JaidenSy/hermes/pull/7\n\n**Status:** opened\n" * 3
         )
         note = self._write_note("Projects/x/agents/deployer4.md", content)
         valid, reason = validate_step_output("deployer", note)
@@ -194,11 +196,36 @@ class TestValidateStepOutput(unittest.TestCase):
         self.assertTrue(valid)
 
     # ------------------------------------------------------------------
-    # Role requirements completeness: all known roles have requirements
+    # Regression: a plan note that follows the planner.md template (## Scope,
+    # not ## Plan) must pass. This is the exact 2026-07-11 failure — the
+    # validator demanded markers no role template ever emits.
     # ------------------------------------------------------------------
 
-    def test_all_pipeline_roles_have_requirements(self):
-        """Every pipeline role that writes output should have a validator entry."""
+    def test_plan_with_template_headings_passes(self):
+        content = (
+            "# Plan: lead generation\n\n"
+            "## Scope\nGet a warm-call list.\n\n"
+            "## Risks\n- none\n\n"
+            "## Files likely to change\n- none\n"
+        )
+        note = self._write_note("Projects/x/agents/plan-scope.md", content)
+        valid, reason = validate_step_output("plan", note)
+        self.assertTrue(valid, reason)
+
+    def test_content_role_without_heading_fails(self):
+        # A raw error dump (long enough to pass the length gate, no heading).
+        content = "Traceback: something exploded and no structured note was written.\n" * 3
+        note = self._write_note("Projects/x/agents/dump.md", content)
+        valid, reason = validate_step_output("coder", note)
+        self.assertFalse(valid)
+        self.assertIn("heading", reason)
+
+    # ------------------------------------------------------------------
+    # Role requirements completeness: every role is covered by exactly one path
+    # ------------------------------------------------------------------
+
+    def test_all_pipeline_roles_are_covered(self):
+        """Every pipeline role is either strict-validated or a content role."""
         expected_roles = {
             "plan",
             "research",
@@ -209,12 +236,9 @@ class TestValidateStepOutput(unittest.TestCase):
             "review",
             "deployer",
         }
+        covered = set(STRICT_ROLE_REQUIREMENTS) | CONTENT_ROLES
         for role in expected_roles:
-            self.assertIn(
-                role,
-                ROLE_REQUIREMENTS,
-                f"Role '{role}' is missing from ROLE_REQUIREMENTS",
-            )
+            self.assertIn(role, covered, f"Role '{role}' has no validator path")
 
 
 if __name__ == "__main__":
