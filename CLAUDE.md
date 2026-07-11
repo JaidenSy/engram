@@ -1,5 +1,7 @@
 # Hermes — Repo Instructions
 
+**Status (2026-07-11):** `main` @ `f50661d`, 0 open PRs, CI green. Hardened via PR #14 — non-code tasks route direct (not a code pipeline), plan-step validator relaxed to match role templates, model routing auto-downgrades `fable→opus→sonnet→haiku` at startup, telegram-only. ⚠️ Reload to apply a merge: `launchctl kickstart -k gui/$(id -u)/dev.arbiterai.hermes`. Full state: `Projects/Hermes/Progress.md` in RaphBrain.
+
 Mac Mini orchestration daemon (replaced OpenClaw). Triggered by **Telegram** `[HERMES] task` (chat_id 8922766986); runs via `claude --print`. Tier-aware model routing (fable/opus/sonnet/haiku per role+tier). Direct tasks run **non-blocking** — `run_task` spawns the agent in a background thread and texts the result via an `on_complete` callback on exit (2h safety kill). Reload the LaunchAgent `dev.arbiterai.hermes` after changing `hermes.py`/`config.yaml`.
 
 **Project routing** is via `project_registry.py` — the single source of truth (scans `~/Projects` + `~/Documents/RaphBrain/Projects`, knows all ~23 projects; add a project = make the folder). Say **`on <project>, <task>`** for deterministic routing; **`projects`/`help`/`status`/`abort`** are commands. Unknown project → fails loud, never runs in `$HOME`.
