@@ -81,23 +81,6 @@ def _detect_project(task_text: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Privacy keywords — must NOT be sent to Ollama
-# ---------------------------------------------------------------------------
-
-PRIVACY_KEYWORDS = [
-    "arbiter",
-    "investor",
-    "fundraising",
-    "strategy",
-    "supplier",
-    "credentials",
-    "api key",
-    "secret",
-    "private",
-    "confidential",
-]
-
-# ---------------------------------------------------------------------------
 # Scaffold-task detection
 # ---------------------------------------------------------------------------
 
@@ -157,6 +140,33 @@ ACTION_KEYWORDS = [
     "replace",
 ]
 
+# Unambiguous non-code work → run as a single general agent (skills available),
+# never a code pipeline. Kept to high-precision phrases so a real code task
+# ("add email validation", "research the auth bug") is NOT caught here — those
+# fall through to Ollama. This is the backstop; the Ollama prompt also learns to
+# set is_direct for the long tail. ponytail: phrase list, not a classifier —
+# grow it only when a real misroute proves a phrase is missing.
+NONDEV_SIGNALS = [
+    "warm call",
+    "cold call",
+    "potential customer",
+    "get customers",
+    "find customers",
+    "lead generation",
+    "generate leads",
+    "sales lead",
+    "prospects",
+    "outreach",
+    "reach out",
+    "charge for my",
+    "sell my",
+    "blog post",
+    "draft an email",
+    "draft a post",
+    "write a post",
+    "write a blog",
+]
+
 # ---------------------------------------------------------------------------
 # Ollama prompt templates (verbatim from architect spec)
 # ---------------------------------------------------------------------------
@@ -188,7 +198,10 @@ Parallel group rules:
 - null means sequential (wait for previous step to finish)
 - Only use parallel groups for: research+architect (group 1) and tester+cleanup (group 2)
 
-is_direct: true only if this is a pure status check, question, or lookup (no code changes needed)
+is_direct: true if the task does NOT require editing code in one of the known projects —
+a status check, question, lookup, research, content/drafting, outreach, sales, or anything
+done with general tools rather than by committing code. When is_direct is true, return "pipeline": [].
+Only build a code pipeline (is_direct false) when the task asks to change code in a repository.
 
 Available roles: plan, research, architect, coder, tester, cleanup, review, deployer
 
@@ -242,26 +255,6 @@ def _tier_to_pipeline(tier: int) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Privacy sanitizer
-# ---------------------------------------------------------------------------
-
-
-def _sanitize_for_ollama(text: str) -> str:
-    """Replace privacy-sensitive keywords with [REDACTED] before sending to Ollama."""
-    sanitized = text
-    for kw in PRIVACY_KEYWORDS:
-        pattern = re.compile(re.escape(kw), re.IGNORECASE)
-        sanitized = pattern.sub("[REDACTED]", sanitized)
-    return sanitized
-
-
-def _has_privacy_keywords(text: str) -> bool:
-    """Return True if any privacy keyword is found in task_text."""
-    lower = text.lower()
-    return any(kw in lower for kw in PRIVACY_KEYWORDS)
-
-
-# ---------------------------------------------------------------------------
 # Direct-task detection
 # ---------------------------------------------------------------------------
 
@@ -277,6 +270,16 @@ def _is_direct_task(task_text: str) -> bool:
     has_action = any(kw in lower for kw in ACTION_KEYWORDS)
     has_direct = any(kw in lower for kw in DIRECT_KEYWORDS)
     return has_direct and not has_action
+
+
+def _is_nondev_task(task_text: str) -> bool:
+    """True for unmistakable non-code work (sales, outreach, content, research).
+
+    These must run as a single general agent — with skills — not a code pipeline.
+    High-precision by design: an ambiguous task falls through to Ollama instead.
+    """
+    lower = task_text.lower()
+    return any(sig in lower for sig in NONDEV_SIGNALS)
 
 
 # ---------------------------------------------------------------------------
@@ -387,11 +390,24 @@ def classify_task(task_text: str) -> PlannerResult:
             raw_ollama_response="",
         )
 
-    # Step 2: Build prompt and call Ollama. No privacy gate/sanitizer — Ollama runs
-    # on localhost (nothing leaves the machine) and redacting "arbiter" only wrecked
-    # classification (forced Tier-2 fallback + an unresolvable project). The
-    # PRIVACY_KEYWORDS / _sanitize_for_ollama helpers are kept dormant for the day a
-    # genuinely remote classifier is wired in.
+    # Step 1.5: Non-dev work (sales / outreach / content / research) — route to a
+    # single general agent, never a code pipeline. Without this a "get me customers"
+    # ask hits Ollama, which only knows how to emit code pipelines and invents a
+    # branch + coder + deployer for a task that touches no repo.
+    if _is_nondev_task(task_text):
+        log.info(f"[planner] Non-dev task detected (direct, no pipeline): {task_text[:60]!r}")
+        return PlannerResult(
+            tier=0,
+            project=forced_project or _detect_project(task_text) or "general",
+            branch_name="",
+            pipeline=[],
+            is_direct=True,
+            raw_ollama_response="",
+        )
+
+    # Step 2: Build prompt and call Ollama. Runs on localhost — nothing leaves the
+    # machine, so no sanitiser. Ollama returns its own is_direct for the long tail of
+    # non-code work the Step-1.5 phrase list doesn't catch.
     projects_hint = 'Known project names (pick one for "project", else "general"): ' + ", ".join(
         project_names()
     )

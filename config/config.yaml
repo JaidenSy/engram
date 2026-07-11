@@ -3,7 +3,7 @@ hermes:
   session_prefix: "hermes"
   log_path: "/Users/raphael_the_great-sage/hermes/logs/hermes.log"
 
-# Trigger method: telegram | imessage | email | webhook | file_watch
+# Telegram is the only supported trigger (see hermes.py main()).
 trigger:
   method: "telegram"
 
@@ -14,83 +14,11 @@ trigger:
     trigger_prefix: "[HERMES]"
     poll_interval_seconds: 15
 
-  imessage:
-    trigger_prefix: "[HERMES]"
-    # Your iPhone number (e.g. +14155551234) or Apple ID email — Hermes replies here
-    reply_to: "+14156239527"
-    poll_interval_seconds: 15
-
-  email:
-    imap_host: "imap.gmail.com"
-    imap_port: 993
-    username: "jaidensy07@gmail.com"
-    # Password stored in keychain — run:
-    # security add-generic-password -a "hermes" -s "hermes-gmail" -w "YOUR_APP_PASSWORD"
-    password_keychain_service: "hermes-gmail"
-    password_keychain_account: "hermes"
-    poll_interval_seconds: 30
-    trigger_subject_prefix: "[HERMES]"
-
-  webhook:
-    host: "0.0.0.0"
-    port: 7799
-    secret: "REPLACE_WITH_RANDOM_SECRET"
-
-  file_watch:
-    watch_dir: "/Users/raphael_the_great-sage/hermes/tasks"
-    poll_interval_seconds: 5
-
-notification:
-  method: "email"
-  email:
-    smtp_host: "smtp.gmail.com"
-    smtp_port: 587
-    to: "jaidensy07@gmail.com"
-    from: "jaidensy07@gmail.com"
-
 models:
-  primary: "claude-code"
-
-  anthropic:
-    heavy: "claude-opus-4-6"
-    fast: "claude-haiku-4-5-20251001"
-    keychain_service: "anthropic-api-key"
-    keychain_account: "hermes"
-
-  deepseek:
-    general: "deepseek-chat"
-    reasoning: "deepseek-reasoner"
-    keychain_service: "deepseek-api-key"
-    keychain_account: "hermes"
-    base_url: "https://api.deepseek.com"
-    privacy_warning: "PUBLIC TASKS ONLY — data stored in China"
-
-  qwen:
-    general: "qwen-turbo"
-    keychain_service: "qwen-api-key"
-    keychain_account: "hermes"
-    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    privacy_warning: "PUBLIC TASKS ONLY — data stored in China"
-
-  gemini:
-    vision: "gemini-2.5-flash-lite"
-    long_context: "gemini-3.5-flash"
-    keychain_service: "gemini-api-key"
-    keychain_account: "hermes"
-    base_url: "https://generativelanguage.googleapis.com/v1beta"
-
-  local:
-    base_url: "http://127.0.0.1:11434"
-    default: "llama3.1:8b"
-    fast: "llama3.2:3b"
-    code: "qwen2.5-coder:7b"
-    code_alt: "deepseek-coder-v2"
-    reasoning: "deepseek-r1:7b"
-    vision: "llava:7b"
-
   # ── Agent model routing (READ BY agent_runner.py — injected into task JSON,
   # consumed by run-agent.sh). Aliases (haiku/sonnet/opus/fable) always resolve
-  # to the latest model of that tier via the claude CLI.
+  # to the latest model of that tier via the claude CLI. Unavailable aliases are
+  # auto-downgraded at startup by agent_runner.probe_models() (fable→opus→…).
   #
   # Routing philosophy:
   #   haiku  → mechanical steps (gather, polish, run a gh command)

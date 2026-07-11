@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import subprocess
 import threading
 from datetime import date, datetime, timezone
@@ -37,11 +38,105 @@ CONFIG_PATH = Path.home() / "hermes" / "config" / "config.yaml"
 # Used when config.yaml is missing or has no agent_models section
 DEFAULT_MODEL_ROUTE = {"model": "sonnet", "max_turns": 60}
 
+log = logging.getLogger("hermes")
+
+# ── Model availability / auto-downgrade ─────────────────────────────────────────
+# Model tier aliases, strongest → weakest. When an alias stops resolving (e.g.
+# Fable leaves the plan), routing auto-downgrades to the next tier that probed OK
+# at daemon startup, so a run never dies on a model the CLI can no longer reach.
+_FALLBACK_CHAIN = ["fable", "opus", "sonnet", "haiku"]
+
+# alias -> substitute, populated by probe_models() at startup. Empty = no downgrades.
+_ALIAS_DOWNGRADE: dict[str, str] = {}
+
+
+def _claude_bin() -> str:
+    """Absolute path to the claude CLI — a launchd daemon's PATH can be minimal."""
+    return shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude")
+
+
+def _model_available(alias: str) -> bool:
+    """Cheap liveness probe: does `claude --model <alias>` actually run?
+
+    False only on an explicit non-zero exit (unknown model / not on plan / auth).
+    A timeout or a broken probe is treated as available — never downgrade a model
+    on a slow or failed probe, only on a definitive 'the CLI rejected it'.
+    """
+    try:
+        r = subprocess.run(
+            [_claude_bin(), "--model", alias, "--print", "ok", "--max-turns", "1"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        return r.returncode == 0
+    except Exception:
+        return True  # fail open — a probe error is not evidence the model is gone
+
+
+def configured_aliases() -> set:
+    """Every model alias referenced in agent_models routing (direct + roles + overrides)."""
+    aliases: set = set()
+    try:
+        with open(CONFIG_PATH) as f:
+            am = (yaml.safe_load(f) or {}).get("models", {}).get("agent_models", {})
+    except Exception:
+        return aliases
+    if am.get("direct", {}).get("model"):
+        aliases.add(am["direct"]["model"])
+    for r in am.get("roles", {}).values():
+        if r.get("model"):
+            aliases.add(r["model"])
+    for tier in am.get("tier_overrides", {}).values():
+        for r in tier.values():
+            if r.get("model"):
+                aliases.add(r["model"])
+    return aliases
+
+
+def probe_models() -> dict:
+    """At daemon startup: probe each tier; map any unavailable-but-used alias to the
+    strongest still-available tier below it. If EVERY probe fails (claude down or
+    logged out) change nothing — that's transient, not a set of dead models.
+
+    ponytail: ~4 cheap `claude` calls per daemon start; upgrade to a cached probe
+    if restarts ever get frequent enough to notice.
+    """
+    _ALIAS_DOWNGRADE.clear()
+    avail = {tier: _model_available(tier) for tier in _FALLBACK_CHAIN}
+    if not any(avail.values()):
+        log.warning(
+            "[agent_runner] All model probes failed — claude CLI down or logged out? "
+            "Leaving model routing unchanged (assumed transient)."
+        )
+        return {}
+
+    configured = configured_aliases()
+    for i, alias in enumerate(_FALLBACK_CHAIN):
+        if alias not in configured or avail.get(alias):
+            continue
+        sub = next((t for t in _FALLBACK_CHAIN[i + 1 :] if avail.get(t)), None)
+        if sub:
+            _ALIAS_DOWNGRADE[alias] = sub
+            log.warning(f"[agent_runner] Model {alias!r} unavailable — routing it to {sub!r}.")
+        else:
+            log.error(
+                f"[agent_runner] Model {alias!r} unavailable and no lower tier is up — "
+                f"steps routed to {alias!r} will fail."
+            )
+    return dict(_ALIAS_DOWNGRADE)
+
+
+def apply_downgrade(model: str) -> str:
+    """Substitute an unavailable alias per the startup probe. No-op if all healthy."""
+    return _ALIAS_DOWNGRADE.get(model, model)
+
 
 def resolve_model_route(role: str, tier: int) -> dict:
     """
     Resolve {model, max_turns} for a pipeline step from config.yaml
-    (models.agent_models). Tier overrides win over role defaults.
+    (models.agent_models). Tier overrides win over role defaults, then any
+    startup-probed downgrade is applied to the chosen model.
     """
     try:
         with open(CONFIG_PATH) as f:
@@ -58,6 +153,7 @@ def resolve_model_route(role: str, tier: int) -> dict:
     tier_cfg = agent_models.get("tier_overrides", {}).get(tier, {}).get(role)
     if tier_cfg:
         route.update(tier_cfg)
+    route["model"] = apply_downgrade(str(route["model"]))
     return route
 
 
@@ -111,8 +207,6 @@ INLINE_ROLE_TEMPLATES: dict[str, str] = {
         "**Status:** opened"
     ),
 }
-
-log = logging.getLogger("hermes")
 
 # Serializes task-id generation so concurrent parallel-group dispatches don't collide.
 _ID_LOCK = threading.Lock()

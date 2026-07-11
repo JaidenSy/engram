@@ -368,5 +368,43 @@ class TestAgentRunnerTargetBranch(unittest.TestCase):
         self.assertIn("develop", prompt)
 
 
+class TestModelProbeDowngrade(unittest.TestCase):
+    """probe_models() must keep a run alive when a model tier (e.g. Fable) is gone."""
+
+    def tearDown(self):
+        import agent_runner as ar
+
+        ar._ALIAS_DOWNGRADE.clear()  # don't leak downgrade state into other tests
+
+    def _probe(self, available: dict, configured: set):
+        import agent_runner as ar
+
+        with (
+            patch.object(ar, "_model_available", lambda a: available.get(a, False)),
+            patch.object(ar, "configured_aliases", lambda: configured),
+        ):
+            return ar.probe_models(), ar
+
+    def test_fable_gone_downgrades_to_opus(self):
+        avail = {"fable": False, "opus": True, "sonnet": True, "haiku": True}
+        m, ar = self._probe(avail, {"fable", "opus", "sonnet", "haiku"})
+        self.assertEqual(m.get("fable"), "opus")
+        self.assertEqual(ar.apply_downgrade("fable"), "opus")
+        self.assertEqual(ar.apply_downgrade("opus"), "opus")  # healthy → untouched
+
+    def test_cascades_to_next_available_tier(self):
+        # fable AND opus gone → both route to the strongest that's up (sonnet).
+        avail = {"fable": False, "opus": False, "sonnet": True, "haiku": True}
+        m, _ = self._probe(avail, {"fable", "opus", "sonnet", "haiku"})
+        self.assertEqual(m.get("fable"), "sonnet")
+        self.assertEqual(m.get("opus"), "sonnet")
+
+    def test_all_down_changes_nothing(self):
+        # claude CLI down / logged out → probes all fail → don't rewrite routing.
+        m, ar = self._probe({}, {"fable", "opus"})
+        self.assertEqual(m, {})
+        self.assertEqual(ar.apply_downgrade("fable"), "fable")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

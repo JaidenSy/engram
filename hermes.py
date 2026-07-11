@@ -10,22 +10,16 @@ import time
 import threading
 import yaml
 import json
-import imaplib
-import email
-import smtplib
 import shutil
 import keyring
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
-from email.mime.text import MIMEText
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
 
 from planner import classify_task, PlannerResult
 from run_engine import RunEngine
-from agent_runner import AgentRunner
+from agent_runner import AgentRunner, probe_models, apply_downgrade
 from output_validator import validate_step_output
 from project_registry import project_map_text, project_names, resolve as resolve_project
 from scaffold_project import run_scaffold
@@ -170,7 +164,7 @@ def run_task(
         direct_cfg = load_config().get("models", {}).get("agent_models", {}).get("direct", {})
     except Exception:
         direct_cfg = {}
-    direct_model = direct_cfg.get("model", "sonnet")
+    direct_model = apply_downgrade(direct_cfg.get("model", "sonnet"))
     direct_max_turns = int(direct_cfg.get("max_turns", 30))
 
     cmd = [
@@ -300,24 +294,6 @@ def _format_duration(started_iso: str, ended_iso: str) -> str:
         return "??"
 
 
-def _send_imessage(reply_to: str, message: str) -> None:
-    """Send an iMessage to reply_to (phone number or Apple ID) via osascript."""
-    if not reply_to:
-        log.info(f"[iMessage] (no reply_to configured): {message[:80]}")
-        return
-    safe = message.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-    script = f"""tell application "Messages"
-    set targetService to 1st service whose service type = iMessage
-    set targetBuddy to buddy "{reply_to}" of targetService
-    send "{safe}" to targetBuddy
-end tell"""
-    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=10)
-    if result.returncode != 0:
-        log.error(f"iMessage send failed: {result.stderr.strip()}")
-    else:
-        log.info(f"iMessage sent to {reply_to}: {message[:80]}")
-
-
 def _redact_token(text: str, token: Optional[str]) -> str:
     """Strip a bot token out of a string before it reaches the logs. requests
     exceptions embed the full request URL (…/bot<TOKEN>/…), so logging a raw exc
@@ -342,17 +318,12 @@ def _send_telegram(token: str, chat_id: int, message: str) -> None:
 
 
 def _send_reply(config: dict, message: str) -> None:
-    """Send a reply via whichever channel is active (telegram or imessage)."""
-    method = config.get("trigger", {}).get("method", "imessage")
-    if method == "telegram":
-        tcfg = config["trigger"]["telegram"]
-        token = keyring.get_password(
-            tcfg["bot_token_keychain_service"], tcfg["bot_token_keychain_account"]
-        )
-        _send_telegram(token, tcfg["chat_id"], message)
-    else:
-        reply_to = config.get("trigger", {}).get("imessage", {}).get("reply_to", "")
-        _send_imessage(reply_to, message)
+    """Send a reply over Telegram — the only supported channel."""
+    tcfg = config["trigger"]["telegram"]
+    token = keyring.get_password(
+        tcfg["bot_token_keychain_service"], tcfg["bot_token_keychain_account"]
+    )
+    _send_telegram(token, tcfg["chat_id"], message)
 
 
 def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, hermes_config: dict) -> None:
@@ -521,7 +492,7 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, hermes_co
                     run_id,
                     {
                         "status": final_status,
-                        "completed_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     },
                 )
                 log.info(f"[orchestrate] Run {run_id} complete — status={final_status}")
@@ -560,7 +531,7 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, hermes_co
                 run_id,
                 {
                     "status": "failed",
-                    "completed_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 },
             )
         except Exception:
@@ -578,7 +549,9 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, hermes_co
         done_count = sum(1 for s in pipeline if s["status"] == "done")
         step_count = len(pipeline)
         started_at = run.get("created_at", "")
-        completed_at = run.get("completed_at", datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
+        completed_at = run.get(
+            "completed_at", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
         total_duration = _format_duration(started_at, completed_at) if started_at else "??"
         final_status = run["status"]
 
@@ -698,7 +671,7 @@ def orchestrate_task(task_text: str, config: dict) -> str:
                 next((s["role"] for s in steps if s.get("status") == "pending"), "—"),
             )
             started = active.get("created_at") or ""
-            now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             elapsed = _format_duration(started, now) if started else "?"
             pipeline_status = (
                 f"🟢 {active.get('project', '?')} [Tier {active.get('tier', '?')}] "
@@ -799,31 +772,6 @@ def orchestrate_task(task_text: str, config: dict) -> str:
     return start_msg
 
 
-def notify(config: dict, subject: str, body: str):
-    method = config["notification"]["method"]
-
-    if method == "log_only":
-        log.info(f"NOTIFY: {subject} | {body}")
-        return
-
-    if method == "email":
-        cfg = config["notification"]["email"]
-        try:
-            password = keyring.get_password("hermes-gmail", "hermes")
-            msg = MIMEText(body)
-            msg["Subject"] = f"[Hermes] {subject}"
-            msg["From"] = cfg["from"]
-            msg["To"] = cfg["to"]
-
-            with smtplib.SMTP(cfg["smtp_host"], cfg["smtp_port"]) as server:
-                server.starttls()
-                server.login(cfg["from"], password)
-                server.send_message(msg)
-            log.info(f"Notification sent: {subject}")
-        except Exception as e:
-            log.error(f"Failed to send notification: {e}")
-
-
 class TelegramPoller:
     """
     Polls Telegram Bot API for new messages.
@@ -918,274 +866,24 @@ class TelegramPoller:
         _send_telegram(self.token, self.chat_id, message)
 
 
-class iMessagePoller:
-    """
-    Polls Messages.app via osascript — no Full Disk Access required.
-    Tracks last-checked timestamp in config/imessage_state.json.
-    Replies via osascript -> Messages.app.
-    """
-
-    STATE_FILE = Path.home() / "hermes" / "config" / "imessage_state.json"
-
-    def __init__(self, config):
-        self.cfg = config["trigger"]["imessage"]
-        self.reply_to = self.cfg.get("reply_to", "")
-        self.prefix = self.cfg.get("trigger_prefix", "[HERMES]")
-        self.hermes_cfg = config
-        self.last_check = self._load_last_check()
-        log.info(
-            f"iMessage poller ready (osascript, no FDA) — "
-            f"tracking from {self.last_check:%Y-%m-%d %H:%M:%S}"
-        )
-
-    def _load_last_check(self) -> datetime:
-        try:
-            if self.STATE_FILE.exists():
-                data = json.loads(self.STATE_FILE.read_text())
-                ts = data.get("last_check_ts")
-                if ts:
-                    return datetime.fromtimestamp(float(ts))
-        except Exception:
-            pass
-        # First run: start from now so we don't replay old messages
-        now = datetime.now()
-        self._save_last_check(now)
-        return now
-
-    def _save_last_check(self, dt: datetime):
-        self.STATE_FILE.write_text(json.dumps({"last_check_ts": dt.timestamp()}))
-
-    def poll(self):
-        now = datetime.now()
-        # macOS AppleScript date string — no zero-padded day or hour
-        cutoff_str = self.last_check.strftime("%B %-d, %Y at %-I:%M:%S %p")
-        prefix_esc = self.prefix.replace('"', '\\"')
-
-        script = f"""set cutoff to date "{cutoff_str}"
-set triggerPrefix to "{prefix_esc}"
-set output to ""
-tell application "Messages"
-    repeat with aChat in chats
-        try
-            set msgs to messages of aChat
-            set msgCount to count of msgs
-            set startIdx to msgCount - 19
-            if startIdx < 1 then set startIdx to 1
-            repeat with i from startIdx to msgCount
-                set aMsg to item i of msgs
-                try
-                    if (date sent of aMsg) > cutoff then
-                        set msgText to text of aMsg
-                        if msgText starts with triggerPrefix then
-                            set output to output & msgText & "|||HSEP|||"
-                        end if
-                    end if
-                end try
-            end repeat
-        end try
-    end repeat
-end tell
-return output"""
-
-        result = subprocess.run(
-            ["osascript", "-e", script], capture_output=True, text=True, timeout=30
-        )
-
-        self.last_check = now
-        self._save_last_check(now)
-
-        if result.returncode != 0:
-            log.error(f"osascript poll error: {result.stderr.strip()}")
-            return
-
-        output = result.stdout.strip()
-        if not output:
-            return
-
-        tasks = [m.strip() for m in output.split("|||HSEP|||") if m.strip()]
-        for text in tasks:
-            task = text[len(self.prefix) :].strip()
-            log.info(f"iMessage task: {task[:80]}...")
-            reply = orchestrate_task(task, self.hermes_cfg)
-            self._reply(reply[:1500])
-
-    def _reply(self, message: str):
-        if not self.reply_to:
-            log.info(f"[no reply_to configured] RESULT: {message}")
-            return
-
-        safe = message.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-        script = f"""tell application "Messages"
-    set targetService to 1st service whose service type = iMessage
-    set targetBuddy to buddy "{self.reply_to}" of targetService
-    send "{safe}" to targetBuddy
-end tell"""
-
-        result = subprocess.run(
-            ["osascript", "-e", script], capture_output=True, text=True, timeout=10
-        )
-        if result.returncode != 0:
-            log.error(f"iMessage reply failed: {result.stderr.strip()}")
-        else:
-            log.info(f"Reply sent via iMessage to {self.reply_to}")
-
-
-class EmailPoller:
-    def __init__(self, config):
-        self.cfg = config["trigger"]["email"]
-        self.hermes_cfg = config
-
-    def poll(self):
-        try:
-            password = keyring.get_password(
-                self.cfg["password_keychain_service"],
-                self.cfg["password_keychain_account"],
-            )
-            mail = imaplib.IMAP4_SSL(self.cfg["imap_host"], self.cfg["imap_port"])
-            mail.login(self.cfg["username"], password)
-            mail.select("inbox")
-
-            prefix = self.cfg["trigger_subject_prefix"]
-            _, msgs = mail.search(None, f'(UNSEEN SUBJECT "{prefix}")')
-
-            for num in msgs[0].split():
-                _, data = mail.fetch(num, "(RFC822)")
-                msg = email.message_from_bytes(data[0][1])
-                subject = msg["subject"]
-                task = subject.replace(prefix, "").strip()
-
-                if msg.is_multipart():
-                    for part in msg.walk():
-                        if part.get_content_type() == "text/plain":
-                            task += "\n\n" + part.get_payload(decode=True).decode()
-                            break
-                else:
-                    task += "\n\n" + msg.get_payload(decode=True).decode()
-
-                log.info(f"Received task via email: {task[:80]}...")
-                mail.store(num, "+FLAGS", "\\Seen")
-
-                run_task(
-                    task,
-                    on_complete=lambda r: notify(self.hermes_cfg, "Task complete", r[:2000]),
-                )
-
-            mail.logout()
-        except Exception as e:
-            log.error(f"Email poll error: {e}")
-
-
-class FileWatcher(FileSystemEventHandler):
-    def __init__(self, config):
-        self.hermes_cfg = config
-
-    def on_created(self, event):
-        if event.is_directory or not event.src_path.endswith(".task"):
-            return
-        path = Path(event.src_path)
-        log.info(f"Task file detected: {path.name}")
-        task = path.read_text().strip()
-        run_task(
-            task,
-            session_name=path.stem,
-            on_complete=lambda r: notify(self.hermes_cfg, f"Task complete: {path.stem}", r[:2000]),
-        )
-        path.unlink()
-
-
-class WebhookListener:
-    def __init__(self, config):
-        self.cfg = config["trigger"]["webhook"]
-        self.hermes_cfg = config
-
-    def run(self):
-        from http.server import HTTPServer, BaseHTTPRequestHandler
-        import hmac
-        import hashlib
-
-        secret = self.cfg["secret"].encode()
-        hermes_cfg = self.hermes_cfg
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self):
-                length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(length)
-                sig = self.headers.get("X-Hermes-Signature", "")
-
-                expected = hmac.new(secret, body, hashlib.sha256).hexdigest()
-                if not hmac.compare_digest(sig, expected):
-                    self.send_response(403)
-                    self.end_headers()
-                    return
-
-                data = json.loads(body)
-                task = data.get("task", "")
-                log.info(f"Webhook task received: {task[:80]}...")
-
-                self.send_response(202)
-                self.end_headers()
-                self.wfile.write(b'{"status": "accepted"}')
-
-                run_task(
-                    task,
-                    on_complete=lambda r: notify(hermes_cfg, "Task complete", r[:2000]),
-                )
-
-            def log_message(self, *args):
-                pass
-
-        server = HTTPServer((self.cfg["host"], self.cfg["port"]), Handler)
-        log.info(f"Webhook listener on port {self.cfg['port']}")
-        server.serve_forever()
-
-
 def main():
     log.info("=== Hermes starting up ===")
     config = load_config()
-    method = config["trigger"]["method"]
 
     subprocess.run([str(Path.home() / "hermes" / "scripts" / "check-connectivity.sh")])
 
     # Recover crash-orphaned runs ONCE here — never per-message (see RunEngine).
     RunEngine().startup_recover_and_cleanup()
 
-    if method == "telegram":
-        log.info("Trigger: Telegram polling")
-        poller = TelegramPoller(config)
-        while True:
-            poller.poll()
-            time.sleep(1)  # poll() long-polls up to 25s; this is just a loop breather
+    # Probe model aliases so routing auto-downgrades if a tier (e.g. Fable) has left
+    # the plan — a run must never die on a model the CLI can no longer reach.
+    probe_models()
 
-    elif method == "imessage":
-        log.info("Trigger: iMessage polling")
-        poller = iMessagePoller(config)
-        while True:
-            poller.poll()
-            time.sleep(config["trigger"]["imessage"]["poll_interval_seconds"])
-
-    elif method == "email":
-        log.info("Trigger: email polling")
-        poller = EmailPoller(config)
-        while True:
-            poller.poll()
-            time.sleep(config["trigger"]["email"]["poll_interval_seconds"])
-
-    elif method == "file_watch":
-        log.info(f"Trigger: file watch on {config['trigger']['file_watch']['watch_dir']}")
-        observer = Observer()
-        handler = FileWatcher(config)
-        observer.schedule(handler, config["trigger"]["file_watch"]["watch_dir"], recursive=False)
-        observer.start()
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            observer.stop()
-        observer.join()
-
-    elif method == "webhook":
-        log.info("Trigger: webhook")
-        WebhookListener(config).run()
+    log.info("Trigger: Telegram polling")
+    poller = TelegramPoller(config)
+    while True:
+        poller.poll()
+        time.sleep(1)  # poll() long-polls up to 25s; this is just a loop breather
 
 
 if __name__ == "__main__":
