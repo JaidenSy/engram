@@ -161,6 +161,17 @@ class TestValidateStepOutput(unittest.TestCase):
         self.assertFalse(valid)
         self.assertIn("## Deployer Output", reason)
 
+    def test_deployer_blocked_passes_without_pr_url(self):
+        # Repro of anonuevo-survey-site 2026-07-17: deploy succeeded but there's no
+        # GitHub repo/PR, so the deployer correctly BLOCKS. Must not hard-fail.
+        content = (
+            "## ✅ Output Complete\n\n"
+            "**Status:** BLOCKED — No GitHub repo exists; Vercel deploy already live.\n"
+        )
+        note = self._write_note("Projects/x/agents/deployer_blocked.md", content)
+        valid, reason = validate_step_output("deployer", note)
+        self.assertTrue(valid, reason)
+
     # ------------------------------------------------------------------
     # Plan / research / architect / tester / cleanup
     # ------------------------------------------------------------------

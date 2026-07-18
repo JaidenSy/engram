@@ -75,6 +75,13 @@ def validate_step_output(role: str, output_note: str) -> tuple[bool, str]:
             )
         return True, ""
 
+    # A deployer that legitimately can't open a PR (no GitHub repo, deploy-only
+    # task) declares BLOCKED — a valid terminal state like the review role, not a
+    # schema failure. Without this, a correct "no PR to open" note hard-fails the
+    # whole run even though the deploy succeeded (anonuevo-survey-site, 2026-07-17).
+    if role == "deployer" and ("🚫 BLOCKED" in content or "**Status:** BLOCKED" in content):
+        return True, ""
+
     # Strict roles: every requirement group must match at least one alternative.
     missing: list[str] = []
     for group in strict:
