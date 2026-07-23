@@ -1,5 +1,5 @@
 """
-test_planner.py — Unit tests for hermes/planner.py
+test_planner.py — Unit tests for engram/planner.py
 
 Tests cover:
   1. Tier 1 hotfix detection
@@ -17,9 +17,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-# Make ~/hermes importable without modifying sys.path permanently
-HERMES_DIR = Path.home() / "hermes"
-sys.path.insert(0, str(HERMES_DIR))
+# Make ~/engram importable without modifying sys.path permanently
+ENGRAM_DIR = Path.home() / "engram"
+sys.path.insert(0, str(ENGRAM_DIR))
 
 from planner import (
     classify_task,
@@ -45,7 +45,7 @@ def setUpModule():
     projects, rb = root / "Projects", root / "RaphBrain"
     projects.mkdir()
     rb.mkdir()
-    for n in ("arbiter", "alphabot", "vitre", "omegabot", "hermes", "raphael"):
+    for n in ("arbiter", "alphabot", "vitre", "omegabot", "engram", "raphael"):
         (projects / n).mkdir()
     (rb / "Vitré").mkdir()
     _pr.set_test_registry(_pr.build_registry(projects, rb, extra_repos={}, detect_pr_base=False))
@@ -156,9 +156,9 @@ class TestPlannerDirectTask(unittest.TestCase):
         self.assertEqual(result.pipeline, [])
 
     def test_check_keyword_is_direct(self):
-        """'check if hermes is running' starts with DIRECT_KEYWORD — no pipeline."""
+        """'check if engram is running' starts with DIRECT_KEYWORD — no pipeline."""
         with patch("planner.subprocess.run") as mock_run:
-            result = classify_task("check if hermes is running")
+            result = classify_task("check if engram is running")
             mock_run.assert_not_called()
         self.assertTrue(result.is_direct)
 
@@ -201,12 +201,12 @@ class TestPlannerTier1(unittest.TestCase):
     def test_tier1_hotfix(self, mock_run):
         """Ollama returns Tier 1 → pipeline has coder, tester, deployer."""
         mock_run.return_value = _mock_subprocess_run(
-            _make_ollama_json(1, "hermes", branch="fix/typo-readme")
+            _make_ollama_json(1, "engram", branch="fix/typo-readme")
         )
-        result = classify_task("Fix typo in hermes README configuration section file")
+        result = classify_task("Fix typo in engram README configuration section file")
         self.assertEqual(result.tier, 1)
         self.assertFalse(result.is_direct)
-        self.assertEqual(result.project, "hermes")
+        self.assertEqual(result.project, "engram")
         roles = [s.role for s in result.pipeline]
         self.assertIn("coder", roles)
         self.assertIn("tester", roles)
@@ -303,9 +303,9 @@ class TestPlannerFallback(unittest.TestCase):
     @patch("planner.subprocess.run")
     def test_missing_required_fields_falls_back(self, mock_run):
         """JSON missing 'tier' key → fallback."""
-        mock_run.return_value = _mock_subprocess_run('{"project": "hermes"}')
+        mock_run.return_value = _mock_subprocess_run('{"project": "engram"}')
         result = classify_task(
-            "Refactor the hermes logging module to support structured JSON output"
+            "Refactor the engram logging module to support structured JSON output"
         )
         self.assertEqual(result.tier, 2)
         self.assertEqual(result.raw_ollama_response, "FALLBACK")
@@ -315,7 +315,7 @@ class TestPlannerFallback(unittest.TestCase):
         """Ollama returning non-zero exit code → fallback."""
         mock_run.return_value = _mock_subprocess_run("", returncode=1)
         result = classify_task(
-            "Implement new feature for hermes system logging with rotation support"
+            "Implement new feature for engram system logging with rotation support"
         )
         self.assertEqual(result.tier, 2)
         self.assertEqual(result.raw_ollama_response, "FALLBACK")
@@ -325,10 +325,10 @@ class TestPlannerFallback(unittest.TestCase):
         """Fallback should pick up known project name from task text."""
         mock_run.return_value = _mock_subprocess_run("not valid json at all")
         result = classify_task(
-            "Add new feature to the hermes project for email-based task dispatch routing"
+            "Add new feature to the engram project for email-based task dispatch routing"
         )
         self.assertEqual(result.tier, 2)
-        self.assertEqual(result.project, "hermes")
+        self.assertEqual(result.project, "engram")
 
     @patch("planner.subprocess.run")
     def test_unknown_role_in_pipeline_uses_tier_default(self, mock_run):
@@ -338,7 +338,7 @@ class TestPlannerFallback(unittest.TestCase):
             json.dumps(
                 {
                     "tier": 2,
-                    "project": "hermes",
+                    "project": "engram",
                     "branch_name": "feature/test",
                     "is_direct": False,
                     "pipeline": bad_pipeline,
@@ -346,7 +346,7 @@ class TestPlannerFallback(unittest.TestCase):
             )
         )
         result = classify_task(
-            "Build a new feature for the hermes project with comprehensive logging"
+            "Build a new feature for the engram project with comprehensive logging"
         )
         self.assertEqual(result.tier, 2)
         roles = [s.role for s in result.pipeline]

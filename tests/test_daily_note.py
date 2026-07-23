@@ -37,13 +37,13 @@ class TestDailyNote(unittest.TestCase):
         note = self._today()
         self.assertTrue(note.exists())
         body = note.read_text()
-        self.assertIn("✅ Hermes: `arbiter/feature/x` done in 42m", body)
+        self.assertIn("✅ Engram: `arbiter/feature/x` done in 42m", body)
 
         # Second call appends, doesn't clobber.
-        engram._append_pipeline_to_daily_note("hermes", "", "failed", "12m", failed_step="tester")
+        engram._append_pipeline_to_daily_note("engram", "", "failed", "12m", failed_step="tester")
         body = note.read_text()
-        self.assertIn("✅ Hermes: `arbiter/feature/x` done", body)  # first line survived
-        self.assertIn("❌ Hermes: `hermes` failed at `tester` (12m)", body)
+        self.assertIn("✅ Engram: `arbiter/feature/x` done", body)  # first line survived
+        self.assertIn("❌ Engram: `engram` failed at `tester` (12m)", body)
 
     def test_unknown_status_writes_nothing(self):
         engram._append_pipeline_to_daily_note("p", "b", "running", "1m")

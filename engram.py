@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Engram — persistent orchestration agent for Jaiden's Mac Mini (formerly "Hermes";
-renamed to disambiguate from Nous Research's hermes-agent).
+Engram — persistent orchestration agent for Jaiden's Mac Mini.
 Listens for commands, dispatches Claude Code sub-agents, reports back.
 """
 
@@ -30,7 +29,7 @@ _BASE = Path(__file__).resolve().parent  # repo dir — rename/move-safe (follow
 CONFIG_PATH = _BASE / "config" / "config.yaml"
 STEP_MAX_RETRIES = 1  # max automatic retries per step (not applicable to rate-limited)
 STEP_RETRY_DELAY_S = 10  # seconds to wait before retrying a failed step
-LOG_PATH = _BASE / "logs" / "hermes.log"
+LOG_PATH = _BASE / "logs" / "engram.log"
 
 # Ensure logs directory exists before configuring file handler
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -40,7 +39,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.FileHandler(LOG_PATH), logging.StreamHandler()],
 )
-log = logging.getLogger("hermes")
+log = logging.getLogger("engram")
 
 
 def load_config():
@@ -159,13 +158,13 @@ def _pending_handoffs() -> list:
 
 def _parse_handoff_meta(text: str) -> dict:
     """Pull {project, task} from a handoff. project comes from the
-    `<!-- hermes-meta project="X" -->` marker; task from the Original task line.
+    `<!-- engram-meta project="X" -->` marker; task from the Original task line.
     Both best-effort — a legacy handoff with neither still lists, just can't
     auto-route (resume falls back to inferring the project)."""
     import re
 
     meta = {"project": "", "task": ""}
-    m = re.search(r'hermes-meta[^>]*project="([^"]*)"', text)
+    m = re.search(r'engram-meta[^>]*project="([^"]*)"', text)
     if m:
         meta["project"] = m.group(1)
     tm = re.search(r"original task:\**\s*(.+)", text, re.I)
@@ -316,7 +315,7 @@ def run_task(
 
     task_file = _BASE / "tasks" / f"{session_name}.md"
     task_file.parent.mkdir(parents=True, exist_ok=True)
-    task_file.write_text(f"# Hermes Task\n\n{task}\n")
+    task_file.write_text(f"# Engram Task\n\n{task}\n")
     log_file = _BASE / "logs" / f"{session_name}.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -398,7 +397,7 @@ def run_task(
         else:
             log.info(f"Direct task {session_name} result (no callback): {result[:200]}")
 
-    threading.Thread(target=_worker, daemon=True, name=f"hermes-task-{session_name}").start()
+    threading.Thread(target=_worker, daemon=True, name=f"engram-task-{session_name}").start()
     tag = f" (project: {project})" if project else ""
     return f"▶ Started {session_name}{tag} — I'll send the result when it's done."
 
@@ -424,12 +423,12 @@ def _append_pipeline_to_daily_note(
         daily_path = RAPHBRAIN_DAILY_DIR / f"{today}.md"
 
         if final_status == "done":
-            line = f"\n- ✅ Hermes: `{project}/{branch}` done in {duration}"
+            line = f"\n- ✅ Engram: `{project}/{branch}` done in {duration}"
         elif final_status == "failed":
             why = f" — {reason}" if reason else ""
-            line = f"\n- ❌ Hermes: `{project}` failed at `{failed_step}`{why} ({duration})"
+            line = f"\n- ❌ Engram: `{project}` failed at `{failed_step}`{why} ({duration})"
         elif final_status == "aborted":
-            line = f"\n- 🛑 Hermes: `{project}/{branch}` aborted ({duration})"
+            line = f"\n- 🛑 Engram: `{project}/{branch}` aborted ({duration})"
         else:
             return  # don't log unknown states
 
@@ -446,7 +445,7 @@ def _append_pipeline_to_daily_note(
 
 
 RAPHBRAIN_PROJECTS_DIR = Path.home() / "Documents" / "RaphBrain" / "Projects"
-HERMES_RUN_LOG_HEADER = "## Hermes Run Log"
+ENGRAM_RUN_LOG_HEADER = "## Engram Run Log"
 # Auto-drafted skills land here for review — NEVER written straight into
 # ~/.claude/skills, which is globally active in every Claude Code session. Jaiden
 # promotes a candidate by hand once he's read it.
@@ -454,11 +453,11 @@ SKILL_CANDIDATES_DIR = _BASE / "skill-candidates"
 
 
 _PROGRESS_LOCK = threading.Lock()
-_RUN_LOG_HEADER_RE = re.compile(r"(?m)^" + re.escape(HERMES_RUN_LOG_HEADER) + r"$")
+_RUN_LOG_HEADER_RE = re.compile(r"(?m)^" + re.escape(ENGRAM_RUN_LOG_HEADER) + r"$")
 
 
 def _prepend_under_runlog(project: str, entry: str) -> None:
-    """Insert `entry` newest-first under the '## Hermes Run Log' header in the
+    """Insert `entry` newest-first under the '## Engram Run Log' header in the
     project's Progress.md, creating the file + section if missing. Shared by the
     deterministic run-note and the post-task learnings writer.
 
@@ -482,16 +481,16 @@ def _prepend_under_runlog(project: str, entry: str) -> None:
                 else:
                     # Header is the file's last line with no trailing newline — insert
                     # one so it stays on its own line. Without this the entry glues on
-                    # ("## Hermes Run Log### …") and the next run can't match the header,
+                    # ("## Engram Run Log### …") and the next run can't match the header,
                     # appending a SECOND section and breaking the single-section rule.
                     content = content[:end] + "\n" + entry + "\n" + content[end:]
             else:
-                content = content.rstrip() + f"\n\n{HERMES_RUN_LOG_HEADER}\n{entry}"
+                content = content.rstrip() + f"\n\n{ENGRAM_RUN_LOG_HEADER}\n{entry}"
             progress_path.write_text(content, encoding="utf-8")
         else:
             progress_path.parent.mkdir(parents=True, exist_ok=True)
             progress_path.write_text(
-                f"# {dir_name} — Progress\n\n{HERMES_RUN_LOG_HEADER}\n{entry}", encoding="utf-8"
+                f"# {dir_name} — Progress\n\n{ENGRAM_RUN_LOG_HEADER}\n{entry}", encoding="utf-8"
             )
 
 
@@ -510,7 +509,7 @@ def _append_pipeline_to_progress_note(
 
     Runs in Python on the completion path, so 'done' GUARANTEES a note exists — it
     never depends on a sub-agent remembering to write one. Entries go under a
-    dedicated '## Hermes Run Log' section so human-curated sections are untouched."""
+    dedicated '## Engram Run Log' section so human-curated sections are untouched."""
     try:
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         emoji = {"done": "✅", "failed": "❌", "aborted": "🛑"}.get(final_status, "🏁")
@@ -581,10 +580,10 @@ def _skill_name(skill_md: str) -> str:
     return ""
 
 
-def spawn_post_task_review(engine, run_id: str, project: str, branch: str, hermes_config) -> None:
+def spawn_post_task_review(engine, run_id: str, project: str, branch: str, engram_config) -> None:
     """Nous-style 'learning': after a DONE run, distill it (local Ollama, free,
     non-blocking) into a Learnings entry in Progress.md + an optional skill CANDIDATE
-    staged in ~/hermes/skill-candidates for review. Never self-installs a skill —
+    staged in ~/engram/skill-candidates for review. Never self-installs a skill —
     an 8B model's draft is a suggestion, not a globally-active skill.
     ponytail: local model + human promote-gate; good enough for a draft."""
 
@@ -628,7 +627,7 @@ def spawn_post_task_review(engine, run_id: str, project: str, branch: str, herme
                     candidate.write_text(skill + "\n", encoding="utf-8")
                     candidate_path = str(candidate)
                     _send_reply(
-                        hermes_config,
+                        engram_config,
                         f"🧠 {project}: drafted a skill candidate — review to promote:\n{candidate_path}",
                     )
             log.info(
@@ -638,7 +637,7 @@ def spawn_post_task_review(engine, run_id: str, project: str, branch: str, herme
         except Exception as exc:
             log.warning(f"[post-task-review] failed for {project}: {exc}")
 
-    threading.Thread(target=_worker, daemon=True, name=f"hermes-review-{run_id}").start()
+    threading.Thread(target=_worker, daemon=True, name=f"engram-review-{run_id}").start()
 
 
 def _format_duration(started_iso: str, ended_iso: str) -> str:
@@ -661,7 +660,7 @@ def _format_duration(started_iso: str, ended_iso: str) -> str:
 def _redact_token(text: str, token: Optional[str]) -> str:
     """Strip a bot token out of a string before it reaches the logs. requests
     exceptions embed the full request URL (…/bot<TOKEN>/…), so logging a raw exc
-    leaks the token into hermes.log."""
+    leaks the token into engram.log."""
     return text.replace(token, "***") if token else text
 
 
@@ -690,7 +689,7 @@ def _send_reply(config: dict, message: str) -> None:
     _send_telegram(token, tcfg["chat_id"], message)
 
 
-def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, hermes_config: dict) -> None:
+def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, engram_config: dict) -> None:
     """
     Background thread: drives a full pipeline run to completion.
 
@@ -752,7 +751,7 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, hermes_co
                     # commands know which repo to resume into (see _parse_handoff_meta).
                     hp = Path(handoff_path)
                     hp.write_text(
-                        f'<!-- hermes-meta project="{project}" run="{run_id}" -->\n'
+                        f'<!-- engram-meta project="{project}" run="{run_id}" -->\n'
                         + hp.read_text()
                     )
                     # Registry is the source of truth for the vault folder — capitalize()
@@ -763,7 +762,7 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, hermes_co
                         Path.home() / "Documents" / "RaphBrain" / "Projects" / vault_dir / "agents"
                     )
                     agents_dir.mkdir(parents=True, exist_ok=True)
-                    mirror = agents_dir / f"hermes-handoff-{task_id or idx}.md"
+                    mirror = agents_dir / f"engram-handoff-{task_id or idx}.md"
                     mirror.write_text(hp.read_text())
                     log.info(f"[orchestrate] Handoff mirrored to: {mirror}")
             except Exception as exc:
@@ -771,7 +770,7 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, hermes_co
 
             handoff_line = f"\nHandoff for a fresh agent: {handoff_path}" if handoff_path else ""
             _send_reply(
-                hermes_config,
+                engram_config,
                 f"⚠️ Blocked on {role}: {reason}{handoff_line}\n\n"
                 f"Reply [ENGRAM] abort to stop, or send a corrected task to work around it.",
             )
@@ -813,7 +812,7 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, hermes_co
                 milestone_msg = (
                     f"✓ {role} done ({duration}) — {run_now['project']}\nNext: {next_label}"
                 )
-                _send_reply(hermes_config, milestone_msg)
+                _send_reply(engram_config, milestone_msg)
             except Exception as exc:
                 log.warning(f"[orchestrate] Failed to send milestone notification: {exc}")
 
@@ -879,7 +878,7 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, hermes_co
                         target=_dispatch_one_step,
                         args=(run_id, idx, step, run),
                         daemon=True,
-                        name=f"hermes-step-{run_id}-{idx}",
+                        name=f"engram-step-{run_id}-{idx}",
                     )
                     threads.append(t)
                     t.start()
@@ -902,7 +901,7 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, hermes_co
             )
         except Exception:
             pass
-        _send_reply(hermes_config, f"❌ Pipeline thread crashed for run {run_id}. Check logs.")
+        _send_reply(engram_config, f"❌ Pipeline thread crashed for run {run_id}. Check logs.")
         return
 
     # Send completion notification
@@ -951,7 +950,7 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, hermes_co
             completion_msg = f"\U0001f3c1 {project} run ended with status: {final_status}"
 
         if completion_msg:
-            _send_reply(hermes_config, completion_msg)
+            _send_reply(engram_config, completion_msg)
 
         # Append a one-liner to today's RaphBrain daily note (with the failure reason).
         failed_step, failed_reason = "", ""
@@ -982,7 +981,7 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, hermes_co
         # Learnings note + an optional skill CANDIDATE (local Ollama, free, staged
         # for review — never auto-installed). Non-blocking.
         if final_status == "done":
-            spawn_post_task_review(engine, run_id, project, branch, hermes_config)
+            spawn_post_task_review(engine, run_id, project, branch, engram_config)
     except Exception as exc:
         log.error(f"[orchestrate] Failed to send completion notification: {exc}")
 
@@ -1054,7 +1053,7 @@ def orchestrate_task(task_text: str, config: dict) -> str:
         "status",
         "what's the status",
         "whats the status",
-        "hermes status",
+        "engram status",
     ):
         engine = RunEngine()
         active = engine.get_active_run()
@@ -1173,7 +1172,7 @@ def orchestrate_task(task_text: str, config: dict) -> str:
         target=_run_pipeline,
         args=(run_id, engine, runner, config),
         daemon=True,
-        name=f"hermes-pipeline-{run_id}",
+        name=f"engram-pipeline-{run_id}",
     )
     t.start()
     log.info(f"[orchestrate] Pipeline thread started: run={run_id} project={result.project}")
@@ -1192,12 +1191,12 @@ class TelegramPoller:
 
     def __init__(self, config):
         self.cfg = config["trigger"]["telegram"]
-        self.hermes_cfg = config
+        self.engram_cfg = config
         self.chat_id = self.cfg["chat_id"]
-        # Accept the new [ENGRAM] prefix and the old [HERMES] one (muscle-memory) — both
-        # optional, since a bare message from the chat is also processed.
+        # An optional [ENGRAM] prefix is stripped if present, but a bare message from
+        # the chat is processed too — Jaiden just texts Telegram directly.
         self.prefix = self.cfg.get("trigger_prefix", "[ENGRAM]")
-        self.prefixes = self.cfg.get("trigger_prefixes") or [self.prefix, "[ENGRAM]", "[HERMES]"]
+        self.prefixes = self.cfg.get("trigger_prefixes") or [self.prefix]
         self.token = keyring.get_password(
             self.cfg["bot_token_keychain_service"],
             self.cfg["bot_token_keychain_account"],
@@ -1254,7 +1253,7 @@ class TelegramPoller:
                 # must not freeze pickup of the next message. Ack immediately.
                 self._reply("👀 on it")
                 threading.Thread(
-                    target=self._process, args=(task,), daemon=True, name="hermes-tg-task"
+                    target=self._process, args=(task,), daemon=True, name="engram-tg-task"
                 ).start()
 
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
@@ -1269,7 +1268,7 @@ class TelegramPoller:
 
     def _process(self, task: str):
         try:
-            reply = orchestrate_task(task, self.hermes_cfg)
+            reply = orchestrate_task(task, self.engram_cfg)
             self._reply(reply[:4096])
         except Exception as task_exc:
             log.error(f"Task execution error: {task_exc}", exc_info=True)

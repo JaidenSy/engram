@@ -8,9 +8,9 @@ trigger:
   method: "telegram"
 
   telegram:
-    # NOTE: keychain service stays "hermes-telegram-bot" — that's where the live
-    # bot token is stored; renaming it here would break token retrieval.
-    bot_token_keychain_service: "hermes-telegram-bot"
+    # NOTE: token was migrated to keychain service "engram-telegram-bot"; the old
+    # "engram-telegram-bot" entry is left as a harmless fallback.
+    bot_token_keychain_service: "engram-telegram-bot"
     bot_token_keychain_account: "bot-token"
     chat_id: 8922766986
     trigger_prefix: "[ENGRAM]"

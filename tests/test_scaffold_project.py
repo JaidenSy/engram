@@ -19,8 +19,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-HERMES_DIR = Path.home() / "hermes"
-sys.path.insert(0, str(HERMES_DIR))
+ENGRAM_DIR = Path.home() / "engram"
+sys.path.insert(0, str(ENGRAM_DIR))
 
 import scaffold_project as sp
 

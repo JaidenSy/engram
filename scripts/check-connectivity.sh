@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "=== Hermes Connectivity Check ==="
+echo "=== Engram Connectivity Check ==="
 echo "Timestamp: $(date)"
 echo ""
 

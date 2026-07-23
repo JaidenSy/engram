@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-planner.py — Task classification module for Hermes Mission Control.
+planner.py — Task classification module for Engram Mission Control.
 
 Classifies incoming task text into a tier, project, branch name, and pipeline
 using a local Ollama (llama3.1:8b) model. Falls back gracefully on failure.
@@ -20,7 +20,7 @@ from typing import Optional
 
 from project_registry import project_names, resolve
 
-log = logging.getLogger("hermes")
+log = logging.getLogger("engram")
 
 # ---------------------------------------------------------------------------
 # Dataclasses
@@ -36,7 +36,7 @@ class PipelineStep:
 @dataclass
 class PlannerResult:
     tier: int  # 0 (direct), 1, 2, or 3
-    project: str  # e.g. "arbiter", "hermes", "raph-ui"
+    project: str  # e.g. "arbiter", "engram", "raph-ui"
     branch_name: str  # e.g. "feature/dark-mode-toggle"
     pipeline: list  # list[PipelineStep]
     is_direct: bool  # True = skip pipeline, call run_task() directly
@@ -501,7 +501,7 @@ if __name__ == "__main__":
 
     test_tasks = [
         "status",
-        "check if hermes is running",
+        "check if engram is running",
         "Fix typo in README",
         "Add dark mode toggle to Arbiter dashboard",
         "Build a new authentication system with JWT, refresh tokens, and OAuth2 for the Arbiter platform",

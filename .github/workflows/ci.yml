@@ -19,9 +19,9 @@ jobs:
       - name: Install dependencies
         run: pip install pytest pyyaml requests keyring watchdog
 
-      - name: Symlink repo to ~/hermes (tests use Path.home() / "hermes")
-        run: ln -sf "$GITHUB_WORKSPACE" "$HOME/hermes"
+      - name: Symlink repo to ~/engram (tests use Path.home() / "engram")
+        run: ln -sf "$GITHUB_WORKSPACE" "$HOME/engram"
 
       - name: Run tests
-        run: pytest tests/ --ignore=tests/test_hermes_endpoints.py -v
+        run: pytest tests/ --ignore=tests/test_engram_endpoints.py -v
         working-directory: ${{ github.workspace }}

@@ -2,7 +2,7 @@
 """
 project_registry.py — single source of truth for Jaiden's projects.
 
-Hermes routes a Telegram task to a project → a repo path (to `cd` into) + a
+Engram routes a Telegram task to a project → a repo path (to `cd` into) + a
 RaphBrain notes folder (for context). Previously three hardcoded lists
 (`PROJECT_MAP`, `KNOWN_PROJECTS`, the Ollama prompt) drifted apart and a wrong
 guess ran the agent in `$HOME` against nothing.
@@ -28,8 +28,7 @@ RAPHBRAIN_PROJECTS_DIR = Path.home() / "Documents" / "RaphBrain" / "Projects"
 
 # Repos that don't live under ~/Projects/.
 _EXTRA_REPOS = {
-    # The daemon's own repo — resolves from this file's location so it survives the
-    # ~/hermes → ~/engram move. Aliased so "hermes" still routes here during transition.
+    # The daemon's own repo — resolves from this file's location (move-safe).
     "engram": Path(__file__).resolve().parent,
     "raphael": Path.home() / "raphael",
 }
@@ -50,7 +49,6 @@ _RAPHBRAIN_SKIP = {
 # so rebrands / alt spellings collapse into one entry. Only for names that are
 # genuinely the same project — never merge two distinct repos.
 _ALIASES = {
-    "hermes": "engram",  # renamed Hermes -> Engram (disambiguate from Nous hermes-agent)
     "raphui": "raphael",
     "raph": "raphael",
     "mira": "vitre",  # rebranded Mira -> Vitré

@@ -12,7 +12,7 @@ repos:
         additional_dependencies:
           - types-PyYAML
           - types-requests
-        exclude: ^(hermes\.py|run_engine\.py)$
+        exclude: ^(engram\.py|run_engine\.py)$
   - repo: local
     hooks:
       - id: pytest

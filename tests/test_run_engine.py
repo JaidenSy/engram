@@ -1,5 +1,5 @@
 """
-test_run_engine.py — Unit tests for hermes/run_engine.py
+test_run_engine.py — Unit tests for engram/run_engine.py
 
 Tests cover:
   1. State transitions: create_run → mark_step_started → mark_step_done → advance to next → final done
@@ -16,12 +16,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-# Make ~/hermes importable
-HERMES_DIR = Path.home() / "hermes"
-sys.path.insert(0, str(HERMES_DIR))
+# Make ~/engram importable
+ENGRAM_DIR = Path.home() / "engram"
+sys.path.insert(0, str(ENGRAM_DIR))
 
 
-def _make_planner_result(tier=2, project="hermes", branch="feature/test", pipeline_steps=None):
+def _make_planner_result(tier=2, project="engram", branch="feature/test", pipeline_steps=None):
     """Build a minimal PlannerResult-like object for testing."""
     from planner import PipelineStep, PlannerResult
 
@@ -42,7 +42,7 @@ def _make_planner_result(tier=2, project="hermes", branch="feature/test", pipeli
 
 
 class TestRunEngineWithTempDir(unittest.TestCase):
-    """All tests use a temp directory for RUNS_DIR — never touch ~/hermes/runs/."""
+    """All tests use a temp directory for RUNS_DIR — never touch ~/engram/runs/."""
 
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -81,7 +81,7 @@ class TestRunEngineWithTempDir(unittest.TestCase):
         run = engine.create_run("test task text", result)
 
         self.assertEqual(run["status"], "pending")
-        self.assertEqual(run["project"], "hermes")
+        self.assertEqual(run["project"], "engram")
         self.assertEqual(run["tier"], 2)
         self.assertIsNotNone(run["id"])
         self.assertEqual(len(run["pipeline"]), 3)
@@ -152,13 +152,13 @@ class TestRunEngineWithTempDir(unittest.TestCase):
         run_id = run["id"]
 
         engine.mark_step_started(run_id, 0, "task-001")
-        engine.mark_step_done(run_id, 0, output_path="Projects/hermes/agents/output.md")
+        engine.mark_step_done(run_id, 0, output_path="Projects/engram/agents/output.md")
 
         updated = engine.get_run(run_id)
         step = updated["pipeline"][0]
         self.assertEqual(step["status"], "done")
         self.assertIsNotNone(step["completed_at"])
-        self.assertEqual(step["output_path"], "Projects/hermes/agents/output.md")
+        self.assertEqual(step["output_path"], "Projects/engram/agents/output.md")
 
     def test_mark_step_done_with_pr_url(self):
         engine = self._engine()
@@ -167,10 +167,10 @@ class TestRunEngineWithTempDir(unittest.TestCase):
         run_id = run["id"]
 
         engine.mark_step_started(run_id, 0, "task-deployer-001")
-        engine.mark_step_done(run_id, 0, pr_url="https://github.com/JaidenSy/hermes/pull/42")
+        engine.mark_step_done(run_id, 0, pr_url="https://github.com/JaidenSy/engram/pull/42")
 
         updated = engine.get_run(run_id)
-        self.assertEqual(updated["pr_url"], "https://github.com/JaidenSy/hermes/pull/42")
+        self.assertEqual(updated["pr_url"], "https://github.com/JaidenSy/engram/pull/42")
 
     # ------------------------------------------------------------------
     # mark_step_failed
@@ -451,7 +451,7 @@ class TestRunEngineWithTempDir(unittest.TestCase):
         }
         self._write_raw_run(run_data)
 
-        self.RunEngine()  # exactly what a second [HERMES] message triggers mid-run
+        self.RunEngine()  # exactly what a second [ENGRAM] message triggers mid-run
 
         updated = json.loads((list(self.tmp_path.glob("*live001*"))[0]).read_text())
         self.assertEqual(updated["status"], "running")

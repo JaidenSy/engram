@@ -1,5 +1,5 @@
 [project]
-name = "hermes"
+name = "engram"
 version = "0.1.0"
 requires-python = ">=3.11"
 
@@ -15,4 +15,4 @@ per-file-ignores = { "tests/*.py" = ["E402"] }
 ignore_missing_imports = true
 # Exclude files that depend on untyped third-party libs (yaml, requests, watchdog)
 # or that use try/except import fallbacks that confuse mypy
-exclude = ["hermes\\.py", "run_engine\\.py"]
+exclude = ["engram\\.py", "run_engine\\.py"]

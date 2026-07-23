@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-agent_runner.py — Hermes Mission Control
+agent_runner.py — Engram Mission Control
 Dispatches a pipeline step as a Raphael task JSON + prompt, then spawns
 run-agent.sh in a detached tmux session.  The RunEngine polls the task JSON
 for completion; this module is only responsible for *launching* the work.
@@ -39,7 +39,7 @@ CONFIG_PATH = _BASE / "config" / "config.yaml"
 # Used when config.yaml is missing or has no agent_models section
 DEFAULT_MODEL_ROUTE = {"model": "sonnet", "max_turns": 60}
 
-log = logging.getLogger("hermes")
+log = logging.getLogger("engram")
 
 # ── Model availability / auto-downgrade ─────────────────────────────────────────
 # Model tier aliases, strongest → weakest. When an alias stops resolving (e.g.
@@ -161,7 +161,7 @@ def resolve_model_route(role: str, tier: int) -> dict:
 # Ensure required directories exist on import
 TASKS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Map from Hermes pipeline role name → template filename (without .md)
+# Map from Engram pipeline role name → template filename (without .md)
 # run-agent.sh also injects these templates by TASK_ROLE, so the names must match.
 ROLE_TEMPLATE_FILENAMES: dict[str, str] = {
     "plan": "planner",
@@ -249,7 +249,7 @@ class AgentRunner:
         step_label = f"Step {step_index + 1} of {len(pipeline)}: {role}"
 
         task_id = self._next_task_id()
-        output_note = f"Projects/{project}/agents/hermes-{task_id}-{role}-output.md"
+        output_note = f"Projects/{project}/agents/engram-{task_id}-{role}-output.md"
         prompt_file = TASKS_DIR / f"{task_id}-prompt.md"
 
         # PR target branch = the repo's actual default branch (origin HEAD), via the
@@ -316,11 +316,11 @@ class AgentRunner:
         return {
             # ── Standard Raphael task fields ──────────────────────────
             "id": task_id,
-            "title": f"[Hermes/T{tier}] {role.upper()}: {run['task_raw'][:80]}",
+            "title": f"[Engram/T{tier}] {role.upper()}: {run['task_raw'][:80]}",
             "description": task_description,
             "status": "pending",
             "priority": "high",
-            "team": "hermes",
+            "team": "engram",
             "role": role,
             "project": project,
             "tier": tier,
@@ -335,9 +335,9 @@ class AgentRunner:
             "completed_at": None,
             "output_note": output_note,
             "raphbrain_project": raphbrain_dir,
-            # ── Hermes metadata (ignored by run-agent.sh, used by RunEngine) ──
-            "hermes_run_id": run["id"],
-            "hermes_step_role": role,
+            # ── Engram metadata (ignored by run-agent.sh, used by RunEngine) ──
+            "engram_run_id": run["id"],
+            "engram_step_role": role,
         }
 
     # ------------------------------------------------------------------
@@ -411,7 +411,7 @@ class AgentRunner:
                 branch=branch,
                 target_branch=target_branch,
                 title="feat: {branch}",
-                body="Automated PR via Hermes Mission Control.",
+                body="Automated PR via Engram Mission Control.",
             )
         return template.strip()
 

@@ -17,8 +17,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-HERMES_DIR = Path.home() / "hermes"
-sys.path.insert(0, str(HERMES_DIR))
+ENGRAM_DIR = Path.home() / "engram"
+sys.path.insert(0, str(ENGRAM_DIR))
 
 from output_validator import (
     validate_step_output,
@@ -129,7 +129,7 @@ class TestValidateStepOutput(unittest.TestCase):
     def test_deployer_all_markers_passes(self):
         content = (
             "## Deployer Output\n\n"
-            "**PR URL:** https://github.com/JaidenSy/hermes/pull/5\n\n"
+            "**PR URL:** https://github.com/JaidenSy/engram/pull/5\n\n"
             "**Status:** opened\n"
         )
         note = self._write_note("Projects/x/agents/deployer.md", content)
@@ -145,7 +145,7 @@ class TestValidateStepOutput(unittest.TestCase):
 
     def test_deployer_missing_status_fails(self):
         content = (
-            "## Deployer Output\n\n**PR URL:** https://github.com/JaidenSy/hermes/pull/6\n" * 3
+            "## Deployer Output\n\n**PR URL:** https://github.com/JaidenSy/engram/pull/6\n" * 3
         )
         note = self._write_note("Projects/x/agents/deployer3.md", content)
         valid, reason = validate_step_output("deployer", note)
@@ -154,7 +154,7 @@ class TestValidateStepOutput(unittest.TestCase):
 
     def test_deployer_missing_header_fails(self):
         content = (
-            "**PR URL:** https://github.com/JaidenSy/hermes/pull/7\n\n**Status:** opened\n" * 3
+            "**PR URL:** https://github.com/JaidenSy/engram/pull/7\n\n**Status:** opened\n" * 3
         )
         note = self._write_note("Projects/x/agents/deployer4.md", content)
         valid, reason = validate_step_output("deployer", note)

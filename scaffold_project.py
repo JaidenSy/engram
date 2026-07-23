@@ -1,5 +1,5 @@
 """
-scaffold_project.py — Scaffold a new Hermes-managed project.
+scaffold_project.py — Scaffold a new Engram-managed project.
 
 Triggered by: [ENGRAM] scaffold new project: <name>
 Creates:
@@ -19,7 +19,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-log = logging.getLogger("hermes")
+log = logging.getLogger("engram")
 
 PROJECTS_DIR = Path.home() / "Projects"
 RAPHBRAIN = Path.home() / "Documents" / "RaphBrain"
@@ -143,7 +143,7 @@ _PROGRESS_MD = """\
 
 ## Last Session — {today}
 ### Done
-- Project scaffolded via Hermes
+- Project scaffolded via Engram
 
 ### Next
 - Define stack and write first tests
@@ -166,7 +166,7 @@ _DECISIONS_MD = """\
 
 | Date | Decision | Rationale |
 |------|----------|-----------|
-| {today} | Project scaffolded | Initial setup via Hermes |
+| {today} | Project scaffolded | Initial setup via Engram |
 
 #decisions #{name}
 """

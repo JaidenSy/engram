@@ -61,7 +61,7 @@ class TestProgressNote(unittest.TestCase):
             step_count=4,
         )
         body = self._progress().read_text()
-        self.assertIn(engram.HERMES_RUN_LOG_HEADER, body)
+        self.assertIn(engram.ENGRAM_RUN_LOG_HEADER, body)
         self.assertIn("✅ arbiter/feature/x — done", body)
         self.assertIn("4/4 steps · 12m", body)
         self.assertIn("PR: http://pr/1", body)
@@ -86,7 +86,7 @@ class TestProgressNote(unittest.TestCase):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(
             "# Arbiter — Progress\n\n## Status\nhand-curated\n\n"
-            f"{engram.HERMES_RUN_LOG_HEADER}\n### old entry\n"
+            f"{engram.ENGRAM_RUN_LOG_HEADER}\n### old entry\n"
         )
         engram._append_pipeline_to_progress_note(
             "arbiter", "feature/new", "done", "1m", done_count=1, step_count=1
@@ -100,7 +100,7 @@ class TestProgressNote(unittest.TestCase):
         # must NOT glue onto the header, and a SECOND run must not append a 2nd section.
         p = self._progress()
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(f"# Arbiter — Progress\n\n{engram.HERMES_RUN_LOG_HEADER}")
+        p.write_text(f"# Arbiter — Progress\n\n{engram.ENGRAM_RUN_LOG_HEADER}")
         engram._append_pipeline_to_progress_note(
             "arbiter", "one", "done", "1m", step_count=1, done_count=1
         )
@@ -108,11 +108,11 @@ class TestProgressNote(unittest.TestCase):
             "arbiter", "two", "done", "1m", step_count=1, done_count=1
         )
         body = p.read_text()
-        self.assertEqual(body.count(engram.HERMES_RUN_LOG_HEADER), 1)  # still one section
+        self.assertEqual(body.count(engram.ENGRAM_RUN_LOG_HEADER), 1)  # still one section
         self.assertIn(
-            f"{engram.HERMES_RUN_LOG_HEADER}\n", body
+            f"{engram.ENGRAM_RUN_LOG_HEADER}\n", body
         )  # header on its own line, not glued
-        self.assertNotIn(f"{engram.HERMES_RUN_LOG_HEADER}###", body)
+        self.assertNotIn(f"{engram.ENGRAM_RUN_LOG_HEADER}###", body)
         self.assertLess(body.index("two"), body.index("one"))  # newest-first preserved
 
     def test_note_uses_registry_folder_not_capitalize(self):
@@ -169,7 +169,7 @@ class TestProgressNote(unittest.TestCase):
             engine = _FakeEngine({"task_raw": "do a thing", "pipeline": []})
             engram.spawn_post_task_review(engine, "rid", "arbiter", "feat/x", {})
             for t in list(threading.enumerate()):
-                if t.name == "hermes-review-rid":
+                if t.name == "engram-review-rid":
                     t.join(timeout=5)
         return reply
 

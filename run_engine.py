@@ -1,7 +1,7 @@
 """
-run_engine.py — RunEngine for Hermes Mission Control.
+run_engine.py — RunEngine for Engram Mission Control.
 
-Manages run state files in ~/hermes/runs/, handles pipeline advancement,
+Manages run state files in ~/engram/runs/, handles pipeline advancement,
 parallel group dispatching, file-locked writes, and step polling.
 """
 
@@ -30,7 +30,7 @@ RUN_FILE_LOCK_TIMEOUT_S = 5  # max wait to acquire file lock
 RUNS_RETENTION_DAYS = 7  # delete terminal runs older than this many days
 LEDGER_FILE = RUNS_DIR / "ledger.jsonl"  # append-only run outcomes, survives cleanup
 
-log = logging.getLogger("hermes")
+log = logging.getLogger("engram")
 
 
 def _append_ledger(data: dict) -> None:
@@ -95,7 +95,7 @@ class RunEngine:
     """
     Manages the lifecycle of pipeline runs stored as JSON files in RUNS_DIR.
 
-    Each run file: ~/hermes/runs/{YYYY-MM-DD-HHMMSS}-{8-char-hex}.json
+    Each run file: ~/engram/runs/{YYYY-MM-DD-HHMMSS}-{8-char-hex}.json
 
     Thread safety: all writes acquire an exclusive fcntl lock on the file.
     Reads are lockless (acceptable stale-read semantics inside poll loops).
@@ -253,7 +253,7 @@ class RunEngine:
                     target=self._dispatch_and_wait,
                     args=(run_id, idx, step),
                     daemon=True,
-                    name=f"hermes-step-{run_id}-{idx}",
+                    name=f"engram-step-{run_id}-{idx}",
                 )
                 threads.append(t)
                 t.start()

@@ -1,9 +1,9 @@
 """
-test_agent_runner.py — Integration tests for hermes/agent_runner.py
+test_agent_runner.py — Integration tests for engram/agent_runner.py
 
 Tests cover:
   1. dispatch_step() writes valid task JSON with all required fields
-  2. Task JSON contains hermes_run_id and hermes_step_role
+  2. Task JSON contains engram_run_id and engram_step_role
   3. Prompt file is written and contains role name + task description
   4. _next_task_id() returns correct format
   5. _find_step_index() returns correct index
@@ -19,13 +19,13 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
-HERMES_DIR = Path.home() / "hermes"
-sys.path.insert(0, str(HERMES_DIR))
+ENGRAM_DIR = Path.home() / "engram"
+sys.path.insert(0, str(ENGRAM_DIR))
 
 
 def _make_run(
     run_id: str = "abc12345",
-    project: str = "hermes",
+    project: str = "engram",
     tier: int = 2,
     branch: str = "feature/test",
     pipeline: list = None,
@@ -108,7 +108,7 @@ class TestAgentRunnerDispatch(unittest.TestCase):
         self.assertTrue(task_file.exists(), f"Task JSON not found: {task_file}")
 
     def test_task_json_required_fields(self):
-        """Task JSON must contain: id, prompt, status=pending, hermes_run_id, hermes_step_role."""
+        """Task JSON must contain: id, prompt, status=pending, engram_run_id, engram_step_role."""
         run = _make_run()
         step = run["pipeline"][0]  # coder step
         task_description = "Add dark mode toggle to dashboard"
@@ -121,10 +121,10 @@ class TestAgentRunnerDispatch(unittest.TestCase):
         self.assertIn("id", task)
         self.assertEqual(task["id"], task_id)
         self.assertEqual(task["status"], "pending")
-        self.assertIn("hermes_run_id", task)
-        self.assertEqual(task["hermes_run_id"], run["id"])
-        self.assertIn("hermes_step_role", task)
-        self.assertEqual(task["hermes_step_role"], "coder")
+        self.assertIn("engram_run_id", task)
+        self.assertEqual(task["engram_run_id"], run["id"])
+        self.assertIn("engram_step_role", task)
+        self.assertEqual(task["engram_step_role"], "coder")
         self.assertIn("description", task)
         self.assertIn("role", task)
         self.assertIn("project", task)
@@ -169,13 +169,13 @@ class TestAgentRunnerDispatch(unittest.TestCase):
         self.assertIn(task_description, prompt)
 
     def test_dispatch_tester_role(self):
-        """dispatch_step() works for tester role and generates correct hermes_step_role."""
+        """dispatch_step() works for tester role and generates correct engram_step_role."""
         run = _make_run()
         step = run["pipeline"][1]  # tester step
         task_id = self._dispatch_with_mock_tmux(step, run)
 
         task = json.loads((self.tmp_tasks / f"{task_id}.json").read_text())
-        self.assertEqual(task["hermes_step_role"], "tester")
+        self.assertEqual(task["engram_step_role"], "tester")
 
     def test_dispatch_spawns_run_agent(self):
         """dispatch_step() must call _spawn_run_agent with the correct task_id."""
@@ -350,7 +350,7 @@ class TestAgentRunnerTargetBranch(unittest.TestCase):
     @patch("agent_runner.pr_base", return_value="main")
     def test_target_branch_is_repo_default_main(self, _pb):
         """Target branch = the repo's default branch (origin HEAD) via the registry."""
-        run = _make_run(project="hermes")
+        run = _make_run(project="engram")
         step = run["pipeline"][0]
         with patch.object(self.runner, "_spawn_run_agent"):
             task_id = self.runner.dispatch_step(step=step, run=run, task_description="test")

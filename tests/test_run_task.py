@@ -1,7 +1,7 @@
 """
 test_run_task.py — unit tests for engram.run_task background execution.
 
-Covers the two behaviors that replaced the old tmux + HERMES_DONE sentinel +
+Covers the two behaviors that replaced the old tmux + ENGRAM_DONE sentinel +
 30-min poll loop:
   1. Normal process exit → captured output is handed to on_complete; the ack
      is returned immediately (daemon never blocks).
@@ -64,7 +64,7 @@ class TestRunTask(unittest.TestCase):
         for d in ("tasks", "logs"):
             p = (
                 Path.home()
-                / "hermes"
+                / "engram"
                 / d
                 / ("test-runtask.md" if d == "tasks" else "test-runtask.log")
             )
@@ -90,20 +90,20 @@ class TestDirectTaskControl(unittest.TestCase):
         engram._DIRECT_TASKS.clear()
 
     def test_summary_lists_task(self):
-        engram._DIRECT_TASKS["hermes-t1"] = {
+        engram._DIRECT_TASKS["engram-t1"] = {
             "task": "check the rebalance",
             "project": "alphabot",
             "started": time.time() - 65,
             "proc": MagicMock(),
         }
         s = engram._direct_tasks_summary()
-        self.assertIn("hermes-t1", s)
+        self.assertIn("engram-t1", s)
         self.assertIn("alphabot", s)
         self.assertIn("1m", s)  # ~65s elapsed
 
     def test_abort_kills_all(self):
         proc = MagicMock()
-        engram._DIRECT_TASKS["hermes-t2"] = {
+        engram._DIRECT_TASKS["engram-t2"] = {
             "task": "x",
             "project": None,
             "started": time.time(),

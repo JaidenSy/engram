@@ -39,7 +39,7 @@ class TestHandoffSystem(unittest.TestCase):
         self._tmp.cleanup()
 
     def _write(self, stem, project="demo", task="ship the thing"):
-        marker = f'<!-- hermes-meta project="{project}" -->\n' if project else ""
+        marker = f'<!-- engram-meta project="{project}" -->\n' if project else ""
         (self._dir / f"{stem}-handoff.md").write_text(
             f"{marker}# Auto-Handoff — {stem}\n\n> **Original task:** {task}\n\n## How To Resume\ndo x\n"
         )
@@ -91,8 +91,8 @@ class TestHandoffSystem(unittest.TestCase):
     def test_out_of_range_index_never_substring_matches_a_stem(self):
         # stems embed unix timestamps; `resume 9` (out of range) must error, NOT
         # substring-match "9" in a timestamp and resume/archive the wrong handoff.
-        (self._dir / "hermes-1753000009-handoff.md").write_text(
-            '<!-- hermes-meta project="demo" -->\n# h\n> **Original task:** t\n'
+        (self._dir / "engram-1753000009-handoff.md").write_text(
+            '<!-- engram-meta project="demo" -->\n# h\n> **Original task:** t\n'
         )
         with (
             patch.object(engram, "run_task") as rt,
@@ -101,7 +101,7 @@ class TestHandoffSystem(unittest.TestCase):
             out = engram._resume_handoff("9", {})
         rt.assert_not_called()
         self.assertIn("matches", out)
-        self.assertTrue((self._dir / "hermes-1753000009-handoff.md").exists())  # not archived
+        self.assertTrue((self._dir / "engram-1753000009-handoff.md").exists())  # not archived
 
     def test_resume_bare_lists_pending(self):
         self._write("t1")

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "=== Hermes Model Availability Check ==="
+echo "=== Engram Model Availability Check ==="
 echo "Timestamp: $(date)"
 echo ""
 
@@ -13,7 +13,7 @@ fi
 echo ""
 
 echo "--- Anthropic API (Opus/Haiku) — SAFE FOR ALL TASKS ---"
-API_KEY=$(security find-generic-password -a "hermes" -s "anthropic-api-key" -w 2>/dev/null)
+API_KEY=$(security find-generic-password -a "engram" -s "anthropic-api-key" -w 2>/dev/null)
 if [ -n "$API_KEY" ]; then
   RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
     https://api.anthropic.com/v1/messages \
@@ -23,12 +23,12 @@ if [ -n "$API_KEY" ]; then
     -d '{"model":"claude-haiku-4-5-20251001","max_tokens":10,"messages":[{"role":"user","content":"ping"}]}')
   [ "$RESPONSE" = "200" ] && echo "✓ Anthropic API reachable" || echo "✗ HTTP $RESPONSE"
 else
-  echo "✗ No API key — run: security add-generic-password -a hermes -s anthropic-api-key -w YOUR_KEY"
+  echo "✗ No API key — run: security add-generic-password -a engram -s anthropic-api-key -w YOUR_KEY"
 fi
 echo ""
 
 echo "--- DeepSeek API — ⚠ PUBLIC TASKS ONLY ---"
-DS_KEY=$(security find-generic-password -a "hermes" -s "deepseek-api-key" -w 2>/dev/null)
+DS_KEY=$(security find-generic-password -a "engram" -s "deepseek-api-key" -w 2>/dev/null)
 if [ -n "$DS_KEY" ]; then
   RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
     https://api.deepseek.com/chat/completions \
@@ -42,7 +42,7 @@ fi
 echo ""
 
 echo "--- Qwen API — ⚠ PUBLIC TASKS ONLY ---"
-QW_KEY=$(security find-generic-password -a "hermes" -s "qwen-api-key" -w 2>/dev/null)
+QW_KEY=$(security find-generic-password -a "engram" -s "qwen-api-key" -w 2>/dev/null)
 if [ -n "$QW_KEY" ]; then
   echo "✓ Qwen key found (\$0.05/MTok — cheapest option)"
 else
@@ -51,7 +51,7 @@ fi
 echo ""
 
 echo "--- Gemini API (Flash-Lite / 3.5 Flash) — SAFE, MULTIMODAL ---"
-GM_KEY=$(security find-generic-password -a "hermes" -s "gemini-api-key" -w 2>/dev/null)
+GM_KEY=$(security find-generic-password -a "engram" -s "gemini-api-key" -w 2>/dev/null)
 if [ -n "$GM_KEY" ]; then
   RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=$GM_KEY" \
