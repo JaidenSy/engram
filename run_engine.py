@@ -299,6 +299,8 @@ class RunEngine:
         run = self.get_run(run_id)
         run["pipeline"][step_index]["status"] = "failed"
         run["pipeline"][step_index]["completed_at"] = now
+        if reason:
+            run["pipeline"][step_index]["reason"] = reason
         run["status"] = "failed"
         run["completed_at"] = now
         self._write_run(run_id, run)

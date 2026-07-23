@@ -189,6 +189,9 @@ class TestRunEngineWithTempDir(unittest.TestCase):
         self.assertEqual(updated["status"], "failed")
         self.assertEqual(updated["pipeline"][0]["status"], "failed")
         self.assertIsNotNone(updated["completed_at"])
+        # Reason is persisted on the step so the completion path can surface it
+        # (daily note, handoff) instead of only logging it and telling Jaiden "check logs".
+        self.assertEqual(updated["pipeline"][0]["reason"], "agent crashed")
 
     # ------------------------------------------------------------------
     # abort_run

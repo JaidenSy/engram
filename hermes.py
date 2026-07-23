@@ -258,7 +258,12 @@ RAPHBRAIN_DAILY_DIR = Path.home() / "Documents" / "RaphBrain" / "Daily"
 
 
 def _append_pipeline_to_daily_note(
-    project: str, branch: str, final_status: str, duration: str, failed_step: str = ""
+    project: str,
+    branch: str,
+    final_status: str,
+    duration: str,
+    failed_step: str = "",
+    reason: str = "",
 ) -> None:
     """Append a one-liner pipeline result to today's RaphBrain daily note."""
     try:
@@ -268,7 +273,8 @@ def _append_pipeline_to_daily_note(
         if final_status == "done":
             line = f"\n- ✅ Hermes: `{project}/{branch}` done in {duration}"
         elif final_status == "failed":
-            line = f"\n- ❌ Hermes: `{project}` failed at `{failed_step}` ({duration})"
+            why = f" — {reason}" if reason else ""
+            line = f"\n- ❌ Hermes: `{project}` failed at `{failed_step}`{why} ({duration})"
         elif final_status == "aborted":
             line = f"\n- 🛑 Hermes: `{project}/{branch}` aborted ({duration})"
         else:
@@ -574,8 +580,12 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, hermes_co
                     f"Steps: {done_count}/{step_count}"
                 )
         elif final_status == "failed":
-            failed_step = next((s["role"] for s in pipeline if s["status"] == "failed"), "unknown")
-            completion_msg = f"❌ {project} failed at step {failed_step}. Check logs."
+            # The step handler already texted a rich, actionable message when the step
+            # died — "⚠️ Blocked on {role}: {reason}" plus the resume-handoff path. A
+            # second "❌ failed, check logs" here only buries that with less info and
+            # points you at the logs. Suppress it; the Blocked message is the last word.
+            # ponytail: None → skip the send; the daily-note line below still records it.
+            completion_msg = None
         elif final_status == "aborted":
             completion_msg = (
                 f"\U0001f6d1 Run aborted: {project} / {branch}\n"
@@ -584,13 +594,19 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, hermes_co
         else:
             completion_msg = f"\U0001f3c1 {project} run ended with status: {final_status}"
 
-        _send_reply(hermes_config, completion_msg)
+        if completion_msg:
+            _send_reply(hermes_config, completion_msg)
 
-        # Append a one-liner to today's RaphBrain daily note.
-        failed_step = ""
+        # Append a one-liner to today's RaphBrain daily note (with the failure reason).
+        failed_step, failed_reason = "", ""
         if final_status == "failed":
-            failed_step = next((s["role"] for s in pipeline if s["status"] == "failed"), "unknown")
-        _append_pipeline_to_daily_note(project, branch, final_status, total_duration, failed_step)
+            failed = next((s for s in pipeline if s["status"] == "failed"), None)
+            if failed:
+                failed_step = failed["role"]
+                failed_reason = failed.get("reason", "")
+        _append_pipeline_to_daily_note(
+            project, branch, final_status, total_duration, failed_step, failed_reason
+        )
     except Exception as exc:
         log.error(f"[orchestrate] Failed to send completion notification: {exc}")
 
@@ -845,6 +861,13 @@ class TelegramPoller:
                     target=self._process, args=(task,), daemon=True, name="hermes-tg-task"
                 ).start()
 
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            # Long-poll read/connect timeouts are normal idle behaviour — the server
+            # holds getUpdates open, the odd hiccup just means the next poll retries.
+            # Log at DEBUG so genuine errors below aren't buried under this noise.
+            # ponytail: DEBUG-only, no consecutive-failure escalation — a real outage
+            # shows up as tasks not getting picked up, which you notice directly.
+            log.debug(f"Telegram poll transient: {_redact_token(str(exc), self.token)}")
         except Exception as exc:
             log.error(f"Telegram poll error: {_redact_token(str(exc), self.token)}")
 
