@@ -322,9 +322,10 @@ def _prepend_under_runlog(project: str, entry: str) -> None:
     project's Progress.md, creating the file + section if missing. Shared by the
     deterministic run-note and the post-task learnings writer.
 
-    Held under a lock: a slow post-task-review thread and the next run's
-    deterministic write can hit the same file's read-modify-write at once, and the
-    loser would silently clobber the other — including the deterministic guarantee."""
+    Held under a lock so the daemon's two writer threads (a slow post-task-review
+    thread and the next run's deterministic write) can't clobber each other's
+    read-modify-write. Cross-PROCESS writers (a `claude -p` sub-agent, Obsidian sync)
+    are out of scope — different sections, infrequent — and not synchronized here."""
     # Registry is the source of truth for the vault folder — capitalize() misroutes
     # hyphenated projects (finance-tracker → a Finance-tracker orphan nothing reads).
     proj = resolve_project(project)
@@ -335,8 +336,15 @@ def _prepend_under_runlog(project: str, entry: str) -> None:
             content = progress_path.read_text(encoding="utf-8")
             m = _RUN_LOG_HEADER_RE.search(content)  # line-anchored — not any prose match
             if m:
-                cut = m.end() + (1 if content[m.end() : m.end() + 1] == "\n" else 0)
-                content = content[:cut] + entry + "\n" + content[cut:]
+                end = m.end()
+                if content[end : end + 1] == "\n":
+                    content = content[: end + 1] + entry + "\n" + content[end + 1 :]
+                else:
+                    # Header is the file's last line with no trailing newline — insert
+                    # one so it stays on its own line. Without this the entry glues on
+                    # ("## Hermes Run Log### …") and the next run can't match the header,
+                    # appending a SECOND section and breaking the single-section rule.
+                    content = content[:end] + "\n" + entry + "\n" + content[end:]
             else:
                 content = content.rstrip() + f"\n\n{HERMES_RUN_LOG_HEADER}\n{entry}"
             progress_path.write_text(content, encoding="utf-8")

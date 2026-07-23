@@ -7,6 +7,7 @@ untouched, and resolve_project is patched so folder resolution is deterministic.
 
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -19,6 +20,14 @@ class _FakeProj:
     def __init__(self, raphbrain_dir):
         self.raphbrain_dir = raphbrain_dir
         self.repo = "~/Projects/x"
+
+
+class _FakeEngine:
+    def __init__(self, run):
+        self._run = run
+
+    def get_run(self, _run_id):
+        return self._run
 
 
 class TestProgressNote(unittest.TestCase):
@@ -86,16 +95,25 @@ class TestProgressNote(unittest.TestCase):
         self.assertIn("hand-curated", body)  # human section survived
         self.assertLess(body.index("feature/new"), body.index("### old entry"))  # newest first
 
-    def test_header_without_trailing_newline_reuses_section(self):
-        # a hand-edited file whose header is the last line (no trailing \n) must not
-        # get a duplicate section appended.
+    def test_header_without_trailing_newline_stays_one_section(self):
+        # a hand-edited file whose header is the last line (no trailing \n): the entry
+        # must NOT glue onto the header, and a SECOND run must not append a 2nd section.
         p = self._progress()
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(f"# Arbiter — Progress\n\n{hermes.HERMES_RUN_LOG_HEADER}")
         hermes._append_pipeline_to_progress_note(
-            "arbiter", "b", "done", "1m", step_count=1, done_count=1
+            "arbiter", "one", "done", "1m", step_count=1, done_count=1
         )
-        self.assertEqual(p.read_text().count(hermes.HERMES_RUN_LOG_HEADER), 1)
+        hermes._append_pipeline_to_progress_note(
+            "arbiter", "two", "done", "1m", step_count=1, done_count=1
+        )
+        body = p.read_text()
+        self.assertEqual(body.count(hermes.HERMES_RUN_LOG_HEADER), 1)  # still one section
+        self.assertIn(
+            f"{hermes.HERMES_RUN_LOG_HEADER}\n", body
+        )  # header on its own line, not glued
+        self.assertNotIn(f"{hermes.HERMES_RUN_LOG_HEADER}###", body)
+        self.assertLess(body.index("two"), body.index("one"))  # newest-first preserved
 
     def test_note_uses_registry_folder_not_capitalize(self):
         # hyphenated project must land in the registry folder, not a capitalize() orphan.
@@ -139,6 +157,39 @@ class TestProgressNote(unittest.TestCase):
         self.assertEqual(hermes._skill_name("name: /etc/passwd"), "etc-passwd")
         self.assertEqual(hermes._skill_name('name: "My Cool Skill!"'), "my-cool-skill")
         self.assertEqual(hermes._skill_name("no frontmatter"), "")
+
+    # --- end-to-end staging path (security-relevant: model output → file on disk) ---
+
+    def _run_review(self, review_out, staging):
+        with (
+            patch.object(hermes, "SKILL_CANDIDATES_DIR", staging),
+            patch.object(hermes, "_ollama_generate", return_value=review_out),
+            patch.object(hermes, "_send_reply") as reply,
+        ):
+            engine = _FakeEngine({"task_raw": "do a thing", "pipeline": []})
+            hermes.spawn_post_task_review(engine, "rid", "arbiter", "feat/x", {})
+            for t in list(threading.enumerate()):
+                if t.name == "hermes-review-rid":
+                    t.join(timeout=5)
+        return reply
+
+    def test_review_stages_real_skill_and_pings(self):
+        staging = self._dir.parent / "skill-candidates"
+        reply = self._run_review(
+            "## Learnings\n- did stuff\n\n## Skill Candidate\n"
+            "---\nname: my-skill\ndescription: does a thing\n---\n1. step\n",
+            staging,
+        )
+        self.assertEqual([f.name for f in staging.glob("*.md")], ["my-skill.md"])
+        reply.assert_called_once()
+
+    def test_review_no_skill_stages_nothing_and_no_ping(self):
+        staging = self._dir.parent / "skill-candidates"
+        reply = self._run_review(
+            "## Learnings\n- did stuff\n\n## Skill Candidate\nNO_SKILL", staging
+        )
+        self.assertFalse(staging.exists() and list(staging.glob("*.md")))
+        reply.assert_not_called()
 
 
 if __name__ == "__main__":
