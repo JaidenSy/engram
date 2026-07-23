@@ -4,5 +4,6 @@ __pycache__/
 logs/
 runs/
 tasks/
+skill-candidates/
 config/telegram_state.json
 config/imessage_state.json

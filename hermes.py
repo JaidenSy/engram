@@ -45,6 +45,31 @@ def load_config():
         return yaml.safe_load(f)
 
 
+def _ollama_generate(prompt: str, timeout: int = 120, model: str = "llama3.1:8b") -> str:
+    """POST a prompt to the local Ollama server; return the response text ("" on any
+    failure). Shared by the resume-handoff and post-task-review writers — both distill
+    text locally so they cost zero Claude tokens."""
+    try:
+        import json as _json
+        import urllib.request as _urllib
+
+        payload = _json.dumps({"model": model, "prompt": prompt, "stream": False}).encode()
+        req = _urllib.Request(
+            "http://localhost:11434/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _urllib.urlopen(req, timeout=timeout) as resp:
+            return _json.loads(resp.read().decode()).get("response", "").strip()
+    except TimeoutError:
+        log.error(f"Ollama generate timed out after {timeout}s")
+        return ""
+    except OSError:
+        log.error("Ollama not reachable — is it running?")
+        return ""
+
+
 def write_handoff_via_ollama(
     task: str,
     session_name: str,
@@ -86,24 +111,12 @@ Write a handoff note in this exact markdown format:
 
 Be specific and factual. Only include what is supported by the partial output above."""
 
+    response_text = _ollama_generate(prompt, timeout=120)
+    if not response_text:
+        log.error("Ollama handoff generation returned empty response")
+        return ""
+
     try:
-        import json as _json
-        import urllib.request as _urllib
-
-        payload = _json.dumps({"model": "llama3.1:8b", "prompt": prompt, "stream": False}).encode()
-        req = _urllib.Request(
-            "http://localhost:11434/api/generate",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with _urllib.urlopen(req, timeout=120) as resp:
-            response_text = _json.loads(resp.read().decode()).get("response", "").strip()
-
-        if not response_text:
-            log.error("Ollama handoff generation returned empty response")
-            return ""
-
         handoff_dir = Path.home() / "Documents" / "RaphBrain" / "Projects" / "handoffs"
         handoff_dir.mkdir(parents=True, exist_ok=True)
         handoff_path = handoff_dir / f"{session_name}-handoff.md"
@@ -116,11 +129,8 @@ Be specific and factual. Only include what is supported by the partial output ab
         )
         log.info(f"Handoff written: {handoff_path}")
         return str(handoff_path)
-    except TimeoutError:
-        log.error("Ollama handoff timed out after 120s")
-        return ""
-    except OSError:
-        log.error("Ollama not found — is it installed?")
+    except OSError as exc:
+        log.error(f"Failed to write handoff file: {exc}")
         return ""
 
 
@@ -290,6 +300,163 @@ def _append_pipeline_to_daily_note(
         log.info(f"[daily-note] Appended pipeline result to {daily_path.name}")
     except Exception as exc:
         log.warning(f"[daily-note] Failed to write to daily note: {exc}")
+
+
+RAPHBRAIN_PROJECTS_DIR = Path.home() / "Documents" / "RaphBrain" / "Projects"
+HERMES_RUN_LOG_HEADER = "## Hermes Run Log"
+# Auto-drafted skills land here for review — NEVER written straight into
+# ~/.claude/skills, which is globally active in every Claude Code session. Jaiden
+# promotes a candidate by hand once he's read it.
+SKILL_CANDIDATES_DIR = Path.home() / "hermes" / "skill-candidates"
+
+
+def _prepend_under_runlog(project: str, entry: str) -> None:
+    """Insert `entry` newest-first under the '## Hermes Run Log' header in the
+    project's Progress.md, creating the file + section if missing. Shared by the
+    deterministic run-note and the post-task learnings writer."""
+    proj_cap = project.capitalize()
+    progress_path = RAPHBRAIN_PROJECTS_DIR / proj_cap / "Progress.md"
+    if progress_path.exists():
+        content = progress_path.read_text()
+        if HERMES_RUN_LOG_HEADER + "\n" in content:
+            head, _, rest = content.partition(HERMES_RUN_LOG_HEADER + "\n")
+            content = head + HERMES_RUN_LOG_HEADER + "\n" + entry + "\n" + rest
+        else:
+            content = content.rstrip() + f"\n\n{HERMES_RUN_LOG_HEADER}\n{entry}"
+        progress_path.write_text(content)
+    else:
+        progress_path.parent.mkdir(parents=True, exist_ok=True)
+        progress_path.write_text(f"# {proj_cap} — Progress\n\n{HERMES_RUN_LOG_HEADER}\n{entry}")
+
+
+def _append_pipeline_to_progress_note(
+    project: str,
+    branch: str,
+    final_status: str,
+    duration: str,
+    pr_url: str = "",
+    failed_step: str = "",
+    reason: str = "",
+    done_count: int = 0,
+    step_count: int = 0,
+) -> None:
+    """Deterministically record a run's outcome in the project's Progress.md.
+
+    Runs in Python on the completion path, so 'done' GUARANTEES a note exists — it
+    never depends on a sub-agent remembering to write one. Entries go under a
+    dedicated '## Hermes Run Log' section so human-curated sections are untouched."""
+    try:
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        emoji = {"done": "✅", "failed": "❌", "aborted": "🛑"}.get(final_status, "🏁")
+        lines = [f"### {stamp} — {emoji} {project}/{branch or '(no branch)'} — {final_status}"]
+        lines.append(
+            f"- {done_count}/{step_count} steps · {duration}" if step_count else f"- {duration}"
+        )
+        if pr_url:
+            lines.append(f"- PR: {pr_url}")
+        if final_status == "failed" and failed_step:
+            lines.append(f"- Failed at `{failed_step}`" + (f" — {reason}" if reason else ""))
+        _prepend_under_runlog(project, "\n".join(lines) + "\n")
+        log.info(f"[progress-note] Recorded {final_status} run for {project} in Progress.md")
+    except Exception as exc:
+        log.warning(f"[progress-note] Failed to write Progress.md: {exc}")
+
+
+_POST_TASK_REVIEW_PROMPT = """You are reviewing a COMPLETED automation run to capture reusable knowledge for next time. Be factual — use ONLY what the notes below support.
+
+ORIGINAL TASK: {task}
+PROJECT: {project}   BRANCH: {branch}
+
+WHAT THE AGENTS PRODUCED (their handoff notes):
+{context}
+
+Respond with EXACTLY these two sections and nothing else:
+
+## Learnings
+2-4 short bullets: what worked, and any gotcha worth remembering. Specific and factual.
+
+## Skill Candidate
+Only if this run followed a genuinely reusable, repeatable procedure worth reusing on future tasks. If it was one-off or too project-specific, write exactly: NO_SKILL
+If reusable, output ONLY a skill in this exact format:
+---
+name: <kebab-case-name>
+description: <one line under 60 chars>
+---
+<numbered step-by-step a future agent would follow to repeat this>
+"""
+
+
+def _split_review(text: str) -> tuple[str, str]:
+    """Split an Ollama review into (learnings, skill_candidate). skill is "" when the
+    model wrote NO_SKILL or omitted the section."""
+    skill = ""
+    pre = text
+    if "## Skill Candidate" in text:
+        pre, _, post = text.partition("## Skill Candidate")
+        if "NO_SKILL" not in post.upper():
+            skill = post.strip()
+    learnings = pre.split("## Learnings", 1)[1].strip() if "## Learnings" in pre else pre.strip()
+    return learnings, skill
+
+
+def _skill_name(skill_md: str) -> str:
+    """Pull the kebab `name:` out of a skill candidate's frontmatter, else ""."""
+    for line in skill_md.splitlines():
+        if line.strip().startswith("name:"):
+            return line.split("name:", 1)[1].strip().strip("\"'")
+    return ""
+
+
+def spawn_post_task_review(engine, run_id: str, project: str, branch: str, hermes_config) -> None:
+    """Nous-style 'learning': after a DONE run, distill it (local Ollama, free,
+    non-blocking) into a Learnings entry in Progress.md + an optional skill CANDIDATE
+    staged in ~/hermes/skill-candidates for review. Never self-installs a skill —
+    an 8B model's draft is a suggestion, not a globally-active skill.
+    ponytail: local model + human promote-gate; good enough for a draft."""
+
+    def _worker():
+        try:
+            run = engine.get_run(run_id)
+            task = run.get("task_raw", "") or run.get("task", "")
+            notes = []
+            for step in run.get("pipeline", []):
+                op = step.get("output_path")
+                if not op:
+                    continue
+                note_path = Path.home() / "Documents" / "RaphBrain" / op
+                if note_path.exists():
+                    notes.append(f"### {step.get('role')}\n{note_path.read_text()[:1500]}")
+            context = ("\n\n".join(notes))[:6000] or "(no step notes captured)"
+            out = _ollama_generate(
+                _POST_TASK_REVIEW_PROMPT.format(
+                    task=task[:400], project=project, branch=branch, context=context
+                ),
+                timeout=180,
+            )
+            if not out:
+                return
+            learnings, skill = _split_review(out)
+            if learnings:
+                stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+                _prepend_under_runlog(project, f"#### {stamp} — 🧠 Learnings\n{learnings}\n")
+            candidate_path = ""
+            if skill:
+                SKILL_CANDIDATES_DIR.mkdir(parents=True, exist_ok=True)
+                name = _skill_name(skill) or f"{project}-{datetime.now().strftime('%Y%m%d-%H%M')}"
+                candidate_path = str(SKILL_CANDIDATES_DIR / f"{name}.md")
+                Path(candidate_path).write_text(skill + "\n")
+                _send_reply(
+                    hermes_config,
+                    f"🧠 {project}: drafted a skill candidate — review to promote:\n{candidate_path}",
+                )
+            log.info(
+                f"[post-task-review] {project}: learnings={'y' if learnings else 'n'} "
+                f"skill_candidate={'y' if candidate_path else 'n'}"
+            )
+        except Exception as exc:
+            log.warning(f"[post-task-review] failed for {project}: {exc}")
+
+    threading.Thread(target=_worker, daemon=True, name=f"hermes-review-{run_id}").start()
 
 
 def _format_duration(started_iso: str, ended_iso: str) -> str:
@@ -607,6 +774,26 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, hermes_co
         _append_pipeline_to_daily_note(
             project, branch, final_status, total_duration, failed_step, failed_reason
         )
+
+        # Guarantee a Progress.md entry for every terminal run — deterministic Python,
+        # not dependent on a sub-agent choosing to write one.
+        _append_pipeline_to_progress_note(
+            project,
+            branch,
+            final_status,
+            total_duration,
+            pr_url or "",
+            failed_step,
+            failed_reason,
+            done_count,
+            step_count,
+        )
+
+        # Nous-style "learning": on success, distill the run into a Progress.md
+        # Learnings note + an optional skill CANDIDATE (local Ollama, free, staged
+        # for review — never auto-installed). Non-blocking.
+        if final_status == "done":
+            spawn_post_task_review(engine, run_id, project, branch, hermes_config)
     except Exception as exc:
         log.error(f"[orchestrate] Failed to send completion notification: {exc}")
 
