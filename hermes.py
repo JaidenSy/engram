@@ -137,6 +137,144 @@ Be specific and factual. Only include what is supported by the partial output ab
         return ""
 
 
+# ---------------------------------------------------------------------------
+# Handoff lifecycle — a failed step already writes a resume handoff; these let
+# Jaiden actually work through them from the phone (list → resume → archive)
+# instead of opening Jump Desktop. Canonical store is the flat handoffs/ dir;
+# resolved ones move into handoffs/resolved/ so the pending list stays honest.
+# ---------------------------------------------------------------------------
+HANDOFFS_DIR = Path.home() / "Documents" / "RaphBrain" / "Projects" / "handoffs"
+HANDOFFS_RESOLVED_DIR = HANDOFFS_DIR / "resolved"
+
+
+def _pending_handoffs() -> list:
+    """Unresolved handoff files, newest first. The top-level glob skips resolved/."""
+    if not HANDOFFS_DIR.exists():
+        return []
+    files = [p for p in HANDOFFS_DIR.glob("*-handoff.md") if p.is_file()]
+    return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def _parse_handoff_meta(text: str) -> dict:
+    """Pull {project, task} from a handoff. project comes from the
+    `<!-- hermes-meta project="X" -->` marker; task from the Original task line.
+    Both best-effort — a legacy handoff with neither still lists, just can't
+    auto-route (resume falls back to inferring the project)."""
+    import re
+
+    meta = {"project": "", "task": ""}
+    m = re.search(r'hermes-meta[^>]*project="([^"]*)"', text)
+    if m:
+        meta["project"] = m.group(1)
+    tm = re.search(r"original task:\**\s*(.+)", text, re.I)
+    if tm:
+        meta["task"] = tm.group(1).strip().rstrip("*").strip()
+    return meta
+
+
+def _list_handoffs() -> str:
+    pend = _pending_handoffs()
+    if not pend:
+        return "✅ No pending handoffs."
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    lines = ["Pending handoffs — `resume <n>` to pick up, `handoffs clear` to dismiss all:"]
+    for i, p in enumerate(pend, 1):
+        try:
+            meta = _parse_handoff_meta(p.read_text())
+        except OSError:
+            meta = {"project": "?", "task": "(unreadable)"}
+        mtime = datetime.fromtimestamp(p.stat().st_mtime, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        lines.append(
+            f"{i}. [{meta['project'] or '?'}] {(meta['task'] or '')[:48]} "
+            f"— {_format_duration(mtime, now)} ago  ({p.stem})"
+        )
+    return "\n".join(lines)
+
+
+def _clear_handoffs() -> str:
+    pend = _pending_handoffs()
+    if not pend:
+        return "✅ No pending handoffs."
+    HANDOFFS_RESOLVED_DIR.mkdir(parents=True, exist_ok=True)
+    moved = 0
+    for p in pend:
+        try:
+            p.rename(HANDOFFS_RESOLVED_DIR / p.name)
+            moved += 1
+        except OSError as exc:
+            log.warning(f"[handoffs] could not archive {p.name}: {exc}")
+    return f"🧹 Cleared {moved} handoff(s) → resolved/."
+
+
+def _resume_handoff(arg: str, config: dict) -> str:
+    """Resume a pending handoff: seed a fresh agent with it in the right repo,
+    then archive the handoff (a new failure writes a fresh one, so the pending
+    list always reflects reality). `arg` = an index into the pending list (empty →
+    just list them), with an optional trailing project override (`2 alphabot`)."""
+    pend = _pending_handoffs()
+    if not pend:
+        return "✅ No pending handoffs to resume. Send `handoffs` to check."
+
+    parts = arg.split()
+    sel = parts[0] if parts else ""
+    override = parts[1] if len(parts) > 1 else ""
+
+    if not sel:  # bare `resume` → just show the list to pick from
+        return _list_handoffs()
+
+    # A numeric selector is ONLY an index — an out-of-range number must fail, never
+    # fall through to a substring match (stems embed unix timestamps full of digits,
+    # so `resume 9` would silently match and resume the WRONG handoff).
+    if sel.isdigit():
+        i = int(sel)
+        chosen = pend[i - 1] if 1 <= i <= len(pend) else None
+    else:
+        chosen = next((p for p in pend if sel in p.stem), None)
+    if chosen is None:
+        return f"❓ No pending handoff matches {sel!r}. Send `handoffs` to list them."
+
+    try:
+        text = chosen.read_text()
+    except OSError as exc:
+        return f"❓ Couldn't read handoff `{chosen.stem}`: {exc}"
+    meta = _parse_handoff_meta(text)
+    project = override or meta["project"]
+    if not project and meta["task"]:
+        try:
+            project = classify_task(meta["task"]).project or ""
+        except Exception:
+            project = ""
+    proj = resolve_project(project) if project else None
+    if not proj or not proj.repo:
+        guessed = f" (guessed {project!r})" if project else ""
+        return (
+            f"❓ Couldn't map handoff `{chosen.stem}` to a repo{guessed}.\n"
+            f"Retry with a project: `resume {sel} <project>`."
+        )
+
+    resume_task = (
+        "RESUME an unfinished task. A previous agent stopped partway and left the "
+        "handoff below. Read it, pick up exactly where it left off, and finish the "
+        "ORIGINAL TASK — do not restart from scratch.\n\n"
+        f"ORIGINAL TASK: {meta['task'] or '(see handoff)'}\n\n"
+        f"--- HANDOFF ---\n{text}"
+    )
+    ack = run_task(
+        resume_task,
+        on_complete=lambda r: _send_reply(config, r[:4096]),
+        project=project,
+        cwd=proj.repo,
+    )
+    try:
+        HANDOFFS_RESOLVED_DIR.mkdir(parents=True, exist_ok=True)
+        chosen.rename(HANDOFFS_RESOLVED_DIR / chosen.name)
+    except OSError as exc:
+        log.warning(f"[handoffs] archive-on-resume failed for {chosen.name}: {exc}")
+    return f"▶ Resuming `{chosen.stem}` in {project}.\n{ack}"
+
+
 # Hard safety kill for a direct task's agent subprocess. Real work finishes in
 # minutes; this only backstops a hung/looping agent so it can't run forever.
 # ponytail: single fixed ceiling — make it per-task config if tasks ever vary wildly.
@@ -607,17 +745,24 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, hermes_co
                 # Mirror into the project's agents/ folder so the next fresh agent
                 # finds it during its RaphBrain scan.
                 if handoff_path and run_snapshot.get("project"):
+                    project = run_snapshot["project"]
+                    # Prepend a machine-readable marker so the `handoffs`/`resume`
+                    # commands know which repo to resume into (see _parse_handoff_meta).
+                    hp = Path(handoff_path)
+                    hp.write_text(
+                        f'<!-- hermes-meta project="{project}" run="{run_id}" -->\n'
+                        + hp.read_text()
+                    )
+                    # Registry is the source of truth for the vault folder — capitalize()
+                    # misroutes hyphenated projects (finance-tracker → Finance-tracker orphan).
+                    _proj = resolve_project(project)
+                    vault_dir = (_proj.raphbrain_dir if _proj else None) or project.capitalize()
                     agents_dir = (
-                        Path.home()
-                        / "Documents"
-                        / "RaphBrain"
-                        / "Projects"
-                        / run_snapshot["project"].capitalize()
-                        / "agents"
+                        Path.home() / "Documents" / "RaphBrain" / "Projects" / vault_dir / "agents"
                     )
                     agents_dir.mkdir(parents=True, exist_ok=True)
                     mirror = agents_dir / f"hermes-handoff-{task_id or idx}.md"
-                    mirror.write_text(Path(handoff_path).read_text())
+                    mirror.write_text(hp.read_text())
                     log.info(f"[orchestrate] Handoff mirrored to: {mirror}")
             except Exception as exc:
                 log.warning(f"[orchestrate] handoff generation failed: {exc}")
@@ -944,6 +1089,17 @@ def orchestrate_task(task_text: str, config: dict) -> str:
     _cmd = task_text.strip().lower().rstrip("?")
     if _cmd in ("projects", "list projects"):
         return "Known projects:\n" + "\n".join(f"• {n}" for n in project_names())
+    if _cmd in ("handoffs", "handoff", "pending"):
+        return _list_handoffs()
+    if _cmd in ("handoffs clear", "clear handoffs"):
+        return _clear_handoffs()
+    # Only intercept `resume` (bare → list) or `resume <n> [project]` — NOT a natural
+    # task that merely starts with the word ("resume the deploy refactor"), which must
+    # still route to the planner.
+    if _cmd == "resume" or (
+        _cmd.startswith("resume ") and _cmd[len("resume ") :].lstrip()[:1].isdigit()
+    ):
+        return _resume_handoff(_cmd[len("resume") :].strip(), config)
     if _cmd in ("help", "commands", "menu"):
         return (
             "Hermes commands:\n"
@@ -951,6 +1107,8 @@ def orchestrate_task(task_text: str, config: dict) -> str:
             "• <task> — I'll infer the project\n"
             "• status — current run\n"
             "• abort — cancel the active run\n"
+            "• handoffs — list unfinished runs you can resume\n"
+            "• resume <n> — pick up handoff #n where it stopped (add a project to override, e.g. `resume 2 alphabot`)\n"
             "• projects — list known projects"
         )
 
