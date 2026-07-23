@@ -13,8 +13,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path.home() / "hermes"))
-import hermes  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import engram  # noqa: E402
 
 
 class _FakeProj:
@@ -28,8 +28,8 @@ class TestHandoffSystem(unittest.TestCase):
         self._dir = Path(self._tmp.name) / "handoffs"
         self._dir.mkdir(parents=True)
         self._resolved = self._dir / "resolved"
-        self._p1 = patch.object(hermes, "HANDOFFS_DIR", self._dir)
-        self._p2 = patch.object(hermes, "HANDOFFS_RESOLVED_DIR", self._resolved)
+        self._p1 = patch.object(engram, "HANDOFFS_DIR", self._dir)
+        self._p2 = patch.object(engram, "HANDOFFS_RESOLVED_DIR", self._resolved)
         self._p1.start()
         self._p2.start()
 
@@ -46,12 +46,12 @@ class TestHandoffSystem(unittest.TestCase):
 
     def test_parse_meta(self):
         self._write("t1", project="finance-tracker", task="fix parser")
-        meta = hermes._parse_handoff_meta((self._dir / "t1-handoff.md").read_text())
+        meta = engram._parse_handoff_meta((self._dir / "t1-handoff.md").read_text())
         self.assertEqual(meta["project"], "finance-tracker")
         self.assertEqual(meta["task"], "fix parser")
 
     def test_parse_meta_legacy_no_marker(self):
-        meta = hermes._parse_handoff_meta("# Auto-Handoff\n\n> **Original task:** old one\n")
+        meta = engram._parse_handoff_meta("# Auto-Handoff\n\n> **Original task:** old one\n")
         self.assertEqual(meta["project"], "")
         self.assertEqual(meta["task"], "old one")
 
@@ -60,33 +60,33 @@ class TestHandoffSystem(unittest.TestCase):
         self._write("newer")
         os.utime(self._dir / "newer-handoff.md", (time.time() + 10, time.time() + 10))
         self.assertEqual(
-            [p.stem for p in hermes._pending_handoffs()], ["newer-handoff", "older-handoff"]
+            [p.stem for p in engram._pending_handoffs()], ["newer-handoff", "older-handoff"]
         )
         self._resolved.mkdir(parents=True, exist_ok=True)
         (self._resolved / "gone-handoff.md").write_text("x")
-        self.assertNotIn("gone-handoff", [p.stem for p in hermes._pending_handoffs()])
+        self.assertNotIn("gone-handoff", [p.stem for p in engram._pending_handoffs()])
 
     def test_list_empty(self):
-        self.assertIn("No pending handoffs", hermes._list_handoffs())
+        self.assertIn("No pending handoffs", engram._list_handoffs())
 
     def test_resume_dispatches_into_repo_then_archives(self):
         self._write("t1", project="demo", task="do it")
         with (
-            patch.object(hermes, "run_task", return_value="▶ started") as rt,
-            patch.object(hermes, "resolve_project", return_value=_FakeProj()),
-            patch.object(hermes, "_send_reply"),
+            patch.object(engram, "run_task", return_value="▶ started") as rt,
+            patch.object(engram, "resolve_project", return_value=_FakeProj()),
+            patch.object(engram, "_send_reply"),
         ):
-            out = hermes._resume_handoff("1", {})
+            out = engram._resume_handoff("1", {})
         rt.assert_called_once()
         self.assertEqual(rt.call_args.kwargs["cwd"], "~/Projects/demo")
         self.assertEqual(rt.call_args.kwargs["project"], "demo")
         self.assertIn("Resuming", out)
-        self.assertEqual(hermes._pending_handoffs(), [])  # left the pending list
+        self.assertEqual(engram._pending_handoffs(), [])  # left the pending list
         self.assertTrue((self._resolved / "t1-handoff.md").exists())  # archived
 
     def test_resume_no_match(self):
         self._write("t1")
-        self.assertIn("matches", hermes._resume_handoff("9", {}))
+        self.assertIn("matches", engram._resume_handoff("9", {}))
 
     def test_out_of_range_index_never_substring_matches_a_stem(self):
         # stems embed unix timestamps; `resume 9` (out of range) must error, NOT
@@ -95,25 +95,25 @@ class TestHandoffSystem(unittest.TestCase):
             '<!-- hermes-meta project="demo" -->\n# h\n> **Original task:** t\n'
         )
         with (
-            patch.object(hermes, "run_task") as rt,
-            patch.object(hermes, "resolve_project", return_value=_FakeProj()),
+            patch.object(engram, "run_task") as rt,
+            patch.object(engram, "resolve_project", return_value=_FakeProj()),
         ):
-            out = hermes._resume_handoff("9", {})
+            out = engram._resume_handoff("9", {})
         rt.assert_not_called()
         self.assertIn("matches", out)
         self.assertTrue((self._dir / "hermes-1753000009-handoff.md").exists())  # not archived
 
     def test_resume_bare_lists_pending(self):
         self._write("t1")
-        self.assertIn("Pending handoffs", hermes._resume_handoff("", {}))
+        self.assertIn("Pending handoffs", engram._resume_handoff("", {}))
 
     def test_resume_unresolvable_project_does_not_dispatch(self):
         self._write("t1", project="")  # legacy, no marker
         with (
-            patch.object(hermes, "run_task") as rt,
-            patch.object(hermes, "classify_task", side_effect=Exception("no ollama")),
+            patch.object(engram, "run_task") as rt,
+            patch.object(engram, "classify_task", side_effect=Exception("no ollama")),
         ):
-            out = hermes._resume_handoff("1", {})
+            out = engram._resume_handoff("1", {})
         rt.assert_not_called()
         self.assertIn("Couldn't map", out)
         self.assertTrue((self._dir / "t1-handoff.md").exists())  # NOT archived on failure
@@ -121,8 +121,8 @@ class TestHandoffSystem(unittest.TestCase):
     def test_clear_moves_all(self):
         self._write("a")
         self._write("b")
-        self.assertIn("Cleared 2", hermes._clear_handoffs())
-        self.assertEqual(hermes._pending_handoffs(), [])
+        self.assertIn("Cleared 2", engram._clear_handoffs())
+        self.assertEqual(engram._pending_handoffs(), [])
         self.assertTrue((self._resolved / "a-handoff.md").exists())
 
 

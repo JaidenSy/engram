@@ -13,8 +13,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path.home() / "hermes"))
-import hermes  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import engram  # noqa: E402
 
 
 class _FakeResp:
@@ -38,9 +38,9 @@ class HandoffCauseTest(unittest.TestCase):
         fake = _FakeResp({"response": "## What Was Completed\n- ran the plan step"})
         with (
             patch("urllib.request.urlopen", return_value=fake),
-            patch.object(hermes.Path, "home", return_value=Path(self._tmp())),
+            patch.object(engram.Path, "home", return_value=Path(self._tmp())),
         ):
-            path = hermes.write_handoff_via_ollama(
+            path = engram.write_handoff_via_ollama(
                 task="get me some customers to warm call",
                 session_name="2026-07-11-000",
                 partial_output="some partial work",
@@ -55,9 +55,9 @@ class HandoffCauseTest(unittest.TestCase):
         fake = _FakeResp({"response": "## What Was Completed\n- x"})
         with (
             patch("urllib.request.urlopen", return_value=fake),
-            patch.object(hermes.Path, "home", return_value=Path(self._tmp())),
+            patch.object(engram.Path, "home", return_value=Path(self._tmp())),
         ):
-            path = hermes.write_handoff_via_ollama("t", "s", "p")
+            path = engram.write_handoff_via_ollama("t", "s", "p")
         self.assertIn("usage limit reached", Path(path).read_text())
 
     def _tmp(self) -> str:

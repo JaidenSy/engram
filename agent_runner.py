@@ -33,7 +33,8 @@ TASKS_DIR = Path.home() / "raphael" / "tasks"
 RAPHBRAIN = Path.home() / "Documents" / "RaphBrain"
 RUN_AGENT = Path.home() / "raphael" / "agents" / "run-agent.sh"
 ROLES_DIR = Path.home() / "raphael" / "templates" / "roles"
-CONFIG_PATH = Path.home() / "hermes" / "config" / "config.yaml"
+_BASE = Path(__file__).resolve().parent  # repo dir — rename/move-safe (follows the folder)
+CONFIG_PATH = _BASE / "config" / "config.yaml"
 
 # Used when config.yaml is missing or has no agent_models section
 DEFAULT_MODEL_ROUTE = {"model": "sonnet", "max_turns": 60}
