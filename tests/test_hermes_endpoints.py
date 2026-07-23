@@ -77,7 +77,7 @@ class TestHermesEndpoints(unittest.TestCase):
         self._runs_tmpdir = tempfile.TemporaryDirectory()
         self._log_tmpdir = tempfile.TemporaryDirectory()
         self.runs_path = Path(self._runs_tmpdir.name)
-        self.log_path = Path(self._log_tmpdir.name) / "hermes.log"
+        self.log_path = Path(self._log_tmpdir.name) / "engram.log"
 
         # Patch HERMES_RUNS_DIR and HERMES_LOG in server module before importing app
         import server as srv

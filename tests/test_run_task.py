@@ -1,5 +1,5 @@
 """
-test_run_task.py — unit tests for hermes.run_task background execution.
+test_run_task.py — unit tests for engram.run_task background execution.
 
 Covers the two behaviors that replaced the old tmux + HERMES_DONE sentinel +
 30-min poll loop:
@@ -17,8 +17,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-sys.path.insert(0, str(Path.home() / "hermes"))
-import hermes  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import engram  # noqa: E402
 
 
 class _FakeProc:
@@ -48,7 +48,7 @@ def _run_and_wait(fake: _FakeProc, task: str = "do a thing"):
         done.set()
 
     with patch("subprocess.Popen", return_value=fake):
-        ack = hermes.run_task(task, session_name="test-runtask", on_complete=cb)
+        ack = engram.run_task(task, session_name="test-runtask", on_complete=cb)
         assert done.wait(timeout=10), "on_complete never fired"
     return ack, box["result"], fake
 
@@ -56,7 +56,7 @@ def _run_and_wait(fake: _FakeProc, task: str = "do a thing"):
 class TestRunTask(unittest.TestCase):
     def setUp(self):
         # Hermetic, fast config lookup — don't depend on config.yaml contents.
-        self._cfg = patch.object(hermes, "load_config", return_value={})
+        self._cfg = patch.object(engram, "load_config", return_value={})
         self._cfg.start()
 
     def tearDown(self):
@@ -87,29 +87,29 @@ class TestDirectTaskControl(unittest.TestCase):
     """Live direct tasks are visible to `status` and killable by `abort`."""
 
     def tearDown(self):
-        hermes._DIRECT_TASKS.clear()
+        engram._DIRECT_TASKS.clear()
 
     def test_summary_lists_task(self):
-        hermes._DIRECT_TASKS["hermes-t1"] = {
+        engram._DIRECT_TASKS["hermes-t1"] = {
             "task": "check the rebalance",
             "project": "alphabot",
             "started": time.time() - 65,
             "proc": MagicMock(),
         }
-        s = hermes._direct_tasks_summary()
+        s = engram._direct_tasks_summary()
         self.assertIn("hermes-t1", s)
         self.assertIn("alphabot", s)
         self.assertIn("1m", s)  # ~65s elapsed
 
     def test_abort_kills_all(self):
         proc = MagicMock()
-        hermes._DIRECT_TASKS["hermes-t2"] = {
+        engram._DIRECT_TASKS["hermes-t2"] = {
             "task": "x",
             "project": None,
             "started": time.time(),
             "proc": proc,
         }
-        n = hermes._abort_direct_tasks()
+        n = engram._abort_direct_tasks()
         self.assertEqual(n, 1)
         proc.kill.assert_called_once()
 

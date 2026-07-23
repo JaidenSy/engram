@@ -21,7 +21,8 @@ from typing import Optional
 # Constants
 # ---------------------------------------------------------------------------
 
-RUNS_DIR = Path.home() / "hermes" / "runs"
+_BASE = Path(__file__).resolve().parent  # repo dir — rename/move-safe (follows the folder)
+RUNS_DIR = _BASE / "runs"
 TASKS_DIR = Path.home() / "raphael" / "tasks"
 STEP_POLL_INTERVAL_S = 5  # poll raphael task JSON every 5 seconds
 STEP_TIMEOUT_S = 3600  # 60-min hard timeout per step

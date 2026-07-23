@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Hermes — persistent orchestration agent for Jaiden's Mac Mini.
-Listens for commands, spawns Claude Code sessions via tmux, reports back.
+Engram — persistent orchestration agent for Jaiden's Mac Mini (formerly "Hermes";
+renamed to disambiguate from Nous Research's hermes-agent).
+Listens for commands, dispatches Claude Code sub-agents, reports back.
 """
 
 import subprocess
@@ -25,10 +26,11 @@ from output_validator import validate_step_output
 from project_registry import project_map_text, project_names, resolve as resolve_project
 from scaffold_project import run_scaffold
 
-CONFIG_PATH = Path.home() / "hermes" / "config" / "config.yaml"
+_BASE = Path(__file__).resolve().parent  # repo dir — rename/move-safe (follows the folder)
+CONFIG_PATH = _BASE / "config" / "config.yaml"
 STEP_MAX_RETRIES = 1  # max automatic retries per step (not applicable to rate-limited)
 STEP_RETRY_DELAY_S = 10  # seconds to wait before retrying a failed step
-LOG_PATH = Path.home() / "hermes" / "logs" / "hermes.log"
+LOG_PATH = _BASE / "logs" / "hermes.log"
 
 # Ensure logs directory exists before configuring file handler
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -307,15 +309,15 @@ def run_task(
     `project` is echoed in the ack so a wrong route is visible immediately.
     """
     if not session_name:
-        session_name = f"hermes-{int(time.time())}"
+        session_name = f"engram-{int(time.time())}"
 
     log.info(f"Spawning direct task: {session_name}")
     log.info(f"Task: {task[:120]}...")
 
-    task_file = Path.home() / "hermes" / "tasks" / f"{session_name}.md"
+    task_file = _BASE / "tasks" / f"{session_name}.md"
     task_file.parent.mkdir(parents=True, exist_ok=True)
     task_file.write_text(f"# Hermes Task\n\n{task}\n")
-    log_file = Path.home() / "hermes" / "logs" / f"{session_name}.log"
+    log_file = _BASE / "logs" / f"{session_name}.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
     # Direct tasks default to sonnet — the classifier sometimes routes real work
@@ -448,7 +450,7 @@ HERMES_RUN_LOG_HEADER = "## Hermes Run Log"
 # Auto-drafted skills land here for review — NEVER written straight into
 # ~/.claude/skills, which is globally active in every Claude Code session. Jaiden
 # promotes a candidate by hand once he's read it.
-SKILL_CANDIDATES_DIR = Path.home() / "hermes" / "skill-candidates"
+SKILL_CANDIDATES_DIR = _BASE / "skill-candidates"
 
 
 _PROGRESS_LOCK = threading.Lock()
@@ -771,7 +773,7 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, hermes_co
             _send_reply(
                 hermes_config,
                 f"⚠️ Blocked on {role}: {reason}{handoff_line}\n\n"
-                f"Reply [HERMES] abort to stop, or send a corrected task to work around it.",
+                f"Reply [ENGRAM] abort to stop, or send a corrected task to work around it.",
             )
 
         final_status = engine.poll_step_completion(run_id, idx, task_id)
@@ -1102,7 +1104,7 @@ def orchestrate_task(task_text: str, config: dict) -> str:
         return _resume_handoff(_cmd[len("resume") :].strip(), config)
     if _cmd in ("help", "commands", "menu"):
         return (
-            "Hermes commands:\n"
+            "Engram commands:\n"
             "• on <project>, <task> — run in a project (e.g. `on alphabot, fix the rebalance bug`)\n"
             "• <task> — I'll infer the project\n"
             "• status — current run\n"
@@ -1153,7 +1155,7 @@ def orchestrate_task(task_text: str, config: dict) -> str:
     except RuntimeError as exc:
         # Another run is already active — queue not yet supported
         log.warning(f"[orchestrate] create_run blocked: {exc}")
-        return f"⚠️ {exc}\nSend [HERMES] abort to cancel the current run first."
+        return f"⚠️ {exc}\nSend [ENGRAM] abort to cancel the current run first."
 
     run_id = run["id"]
     pipeline_summary = " → ".join(s.role for s in result.pipeline)
@@ -1186,13 +1188,16 @@ class TelegramPoller:
     Replies via sendMessage API.
     """
 
-    STATE_FILE = Path.home() / "hermes" / "config" / "telegram_state.json"
+    STATE_FILE = _BASE / "config" / "telegram_state.json"
 
     def __init__(self, config):
         self.cfg = config["trigger"]["telegram"]
         self.hermes_cfg = config
         self.chat_id = self.cfg["chat_id"]
-        self.prefix = self.cfg.get("trigger_prefix", "[HERMES]")
+        # Accept the new [ENGRAM] prefix and the old [HERMES] one (muscle-memory) — both
+        # optional, since a bare message from the chat is also processed.
+        self.prefix = self.cfg.get("trigger_prefix", "[ENGRAM]")
+        self.prefixes = self.cfg.get("trigger_prefixes") or [self.prefix, "[ENGRAM]", "[HERMES]"]
         self.token = keyring.get_password(
             self.cfg["bot_token_keychain_service"],
             self.cfg["bot_token_keychain_account"],
@@ -1238,7 +1243,11 @@ class TelegramPoller:
                 if not text:
                     continue
 
-                task = text[len(self.prefix) :].strip() if text.startswith(self.prefix) else text
+                task = text
+                for pfx in self.prefixes:
+                    if text.startswith(pfx):
+                        task = text[len(pfx) :].strip()
+                        break
                 self._journal(update["update_id"], task)
                 log.info(f"Telegram task: {task[:80]}...")
                 # Process off the poll loop: a slow classification (Ollama ~15-30s)
@@ -1270,7 +1279,7 @@ class TelegramPoller:
         """Append the raw message before processing so a daemon crash mid-task
         leaves a trace instead of silently losing it (offset already advanced)."""
         try:
-            jpath = Path.home() / "hermes" / "logs" / "telegram-journal.log"
+            jpath = _BASE / "logs" / "telegram-journal.log"
             with jpath.open("a") as f:
                 f.write(f"{update_id}\t{task}\n")
         except Exception:
@@ -1281,10 +1290,10 @@ class TelegramPoller:
 
 
 def main():
-    log.info("=== Hermes starting up ===")
+    log.info("=== Engram starting up ===")
     config = load_config()
 
-    subprocess.run([str(Path.home() / "hermes" / "scripts" / "check-connectivity.sh")])
+    subprocess.run([str(_BASE / "scripts" / "check-connectivity.sh")])
 
     # Recover crash-orphaned runs ONCE here — never per-message (see RunEngine).
     RunEngine().startup_recover_and_cleanup()

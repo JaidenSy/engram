@@ -1,7 +1,7 @@
 """
 scaffold_project.py — Scaffold a new Hermes-managed project.
 
-Triggered by: [HERMES] scaffold new project: <name>
+Triggered by: [ENGRAM] scaffold new project: <name>
 Creates:
   - ~/Projects/<name>/  with src/, tests/, .github/workflows/ci.yml
   - Standard files: CLAUDE.md, pyproject.toml, .pre-commit-config.yaml
