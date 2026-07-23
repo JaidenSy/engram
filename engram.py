@@ -24,6 +24,7 @@ from agent_runner import AgentRunner, probe_models, apply_downgrade
 from output_validator import validate_step_output
 from project_registry import project_map_text, project_names, resolve as resolve_project
 from scaffold_project import run_scaffold
+import scheduler  # noqa: E402  (used by the schedule commands + Scheduler thread in main)
 
 _BASE = Path(__file__).resolve().parent  # repo dir — rename/move-safe (follows the folder)
 CONFIG_PATH = _BASE / "config" / "config.yaml"
