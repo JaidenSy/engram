@@ -6,7 +6,7 @@
 
 **Reloading the daemon is PRE-AUTHORIZED for Claude (Jaiden, 2026-07-22)** — after merging an Engram PR, reload without asking: `launchctl kickstart -k gui/$(id -u)/dev.arbiterai.engram`, then verify the boot (`grep "poller ready" logs/engram.log`). This is the one deploy action that doesn't need a fresh OK. (Still ask before anything else outward-facing.)
 
-**Next up (approved):** cron self-scheduler (closes the "can't self-inject a task" gap), skill-candidate hygiene + `promote <n>`, per-run cost line, `recall <project>` run-search; then install the Nous home-assistant agent to coexist. See `Projects/Engram/Nous-Comparison-2026-07-22.md`.
+**Next up (approved):** cron self-scheduler ✅ done, skill-candidate lifecycle (`skills`/`promote <n>`/`reject <n>` + aging/dedup) ✅ **PR open on `feature/skill-candidate-lifecycle`**, per-run cost line, `recall <project>` run-search. Nous home-assistant onboarding = **dropped** (installed at `~/.hermes` but never onboarded; not worth it — see `Projects/Engram/Nous-Comparison-2026-07-22.md`). Deeper Nous-concept map (curator/learning/memory/doctor/sessions/security) in `Projects/Engram/Nous-Concepts-Port-2026-07-23.md`.
 
 Mac Mini orchestration daemon (replaced OpenClaw). Triggered by **Telegram** `[ENGRAM] task` (chat_id 8922766986); runs via `claude --print`. Tier-aware model routing (fable/opus/sonnet/haiku per role+tier). Direct tasks run **non-blocking** — `run_task` spawns the agent in a background thread and texts the result via an `on_complete` callback on exit (2h safety kill). Reload the LaunchAgent `dev.arbiterai.engram` after changing `engram.py`/`config.yaml`.
 

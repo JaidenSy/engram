@@ -25,6 +25,7 @@ from output_validator import validate_step_output
 from project_registry import project_map_text, project_names, resolve as resolve_project
 from scaffold_project import run_scaffold
 import scheduler  # noqa: E402  (used by the schedule commands + Scheduler thread in main)
+import skill_candidates  # noqa: E402  (skills/promote/reject cmds + spawn_post_task_review)
 
 _BASE = Path(__file__).resolve().parent  # repo dir — rename/move-safe (follows the folder)
 CONFIG_PATH = _BASE / "config" / "config.yaml"
@@ -447,10 +448,9 @@ def _append_pipeline_to_daily_note(
 
 RAPHBRAIN_PROJECTS_DIR = Path.home() / "Documents" / "RaphBrain" / "Projects"
 ENGRAM_RUN_LOG_HEADER = "## Engram Run Log"
-# Auto-drafted skills land here for review — NEVER written straight into
-# ~/.claude/skills, which is globally active in every Claude Code session. Jaiden
-# promotes a candidate by hand once he's read it.
-SKILL_CANDIDATES_DIR = _BASE / "skill-candidates"
+# Staged skill candidates + their promote/reject/age lifecycle live in
+# skill_candidates.py (the Curator concept). engram only *writes* candidates here
+# (spawn_post_task_review); the module owns everything downstream.
 
 
 _PROGRESS_LOCK = threading.Lock()
@@ -543,6 +543,7 @@ Respond with EXACTLY these two sections and nothing else:
 
 ## Skill Candidate
 DEFAULT TO NO_SKILL. Propose a skill ONLY if this run followed a genuinely reusable, repeatable procedure you would run again on a DIFFERENT project. One-off, project-specific, or "just did the task" work is NOT a skill — when in doubt, write exactly: NO_SKILL
+NEVER propose a skill that hardens a constraint the agent should NOT carry forward: an environment-specific failure (a missing tool, a path that didn't exist here), a transient error (a network blip, a rate limit), a negative claim about a tool ("X doesn't work"), or anything that only made sense in this one repo. Those bite later. Write NO_SKILL for them.
 If (and only if) it is truly reusable, output ONLY a skill in this exact format:
 ---
 name: <kebab-case-name>
@@ -566,19 +567,6 @@ def _split_review(text: str) -> tuple[str, str]:
             skill = post
     learnings = pre.split("## Learnings", 1)[1].strip() if "## Learnings" in pre else pre.strip()
     return learnings, skill
-
-
-def _skill_name(skill_md: str) -> str:
-    """Pull the kebab `name:` from a skill candidate's frontmatter, sanitized to a safe
-    bare filename ("" if none). Sanitizing is load-bearing security, not cosmetics: the
-    name comes from an 8B model fed agent notes, and it becomes a path — an unsanitized
-    `../../.claude/skills/x` or absolute path would escape the staging dir into the
-    globally-active skills folder, defeating the whole review gate."""
-    for line in skill_md.splitlines():
-        if line.strip().startswith("name:"):
-            raw = line.split("name:", 1)[1].strip().strip("\"'")
-            return re.sub(r"[^a-z0-9-]+", "-", raw.lower()).strip("-")[:60]
-    return ""
 
 
 def spawn_post_task_review(engine, run_id: str, project: str, branch: str, engram_config) -> None:
@@ -619,17 +607,25 @@ def spawn_post_task_review(engine, run_id: str, project: str, branch: str, engra
             # Stage ONLY a candidate that parses as a real skill with a safe name — no
             # timestamp fallback. A nameless/prose blob is not a skill, so it never
             # stages a garbage file or pings Jaiden on a plain successful run.
-            name = _skill_name(skill) if skill else ""
-            if skill and skill.startswith("---") and name:
-                SKILL_CANDIDATES_DIR.mkdir(parents=True, exist_ok=True)
-                candidate = SKILL_CANDIDATES_DIR / f"{name}.md"
+            name = skill_candidates.skill_name(skill) if skill else ""
+            # Dedup (Nous-curator style): a procedure Engram has already staged or
+            # promoted shouldn't re-stage and re-ping every run it recurs.
+            if (
+                skill
+                and skill.startswith("---")
+                and name
+                and not skill_candidates.already_known(name)
+            ):
+                skill_candidates.CANDIDATES_DIR.mkdir(parents=True, exist_ok=True)
+                candidate = skill_candidates.CANDIDATES_DIR / f"{name}.md"
                 # Extra belt: the resolved path must stay inside the staging dir.
-                if candidate.resolve().parent == SKILL_CANDIDATES_DIR.resolve():
+                if candidate.resolve().parent == skill_candidates.CANDIDATES_DIR.resolve():
                     candidate.write_text(skill + "\n", encoding="utf-8")
                     candidate_path = str(candidate)
                     _send_reply(
                         engram_config,
-                        f"🧠 {project}: drafted a skill candidate — review to promote:\n{candidate_path}",
+                        f"🧠 {project}: drafted a skill candidate — "
+                        f"`skills` to review, `promote <n>` to install:\n{candidate_path}",
                     )
             log.info(
                 f"[post-task-review] {project}: learnings={'y' if learnings else 'n'} "
@@ -1110,6 +1106,19 @@ def orchestrate_task(task_text: str, config: dict) -> str:
         return scheduler.remove_schedule(_cmd[len("unschedule ") :])
     if _cmd == "schedule" or _cmd.startswith("schedule "):
         return scheduler.add_schedule(task_text.strip()[len("schedule") :].strip())
+    # Skill-candidate lifecycle (the Curator concept). Numeric-only selectors, and
+    # only intercept `promote`/`reject <n>` when what follows is a digit — a natural
+    # task ("promote the staging env to prod") must still route to the planner.
+    if _cmd in ("skills", "candidates"):
+        return skill_candidates.list_candidates()
+    if _cmd == "promote" or (
+        _cmd.startswith("promote ") and _cmd[len("promote ") :].lstrip()[:1].isdigit()
+    ):
+        return skill_candidates.promote(_cmd[len("promote") :].strip())
+    if _cmd == "reject" or (
+        _cmd.startswith("reject ") and _cmd[len("reject ") :].lstrip()[:1].isdigit()
+    ):
+        return skill_candidates.reject(_cmd[len("reject") :].strip())
     if _cmd in ("help", "commands", "menu"):
         return (
             "Engram commands:\n"
@@ -1121,6 +1130,8 @@ def orchestrate_task(task_text: str, config: dict) -> str:
             "• resume <n> — pick up handoff #n where it stopped (add a project to override, e.g. `resume 2 alphabot`)\n"
             "• schedule <when> | <task> — self-run later/recurring (e.g. `schedule daily 09:00 | on alphabot, morning check`)\n"
             "• schedules / unschedule <n> — list / remove schedules\n"
+            "• skills — list staged skill candidates\n"
+            "• promote <n> / reject <n> — install / dismiss candidate #n\n"
             "• projects — list known projects"
         )
 
