@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import engram  # noqa: E402
+import skill_candidates  # noqa: E402  (patched + skill_name asserted below)
 
 
 class _FakeProj:
@@ -147,22 +148,17 @@ class TestProgressNote(unittest.TestCase):
         learnings, skill = engram._split_review(text)
         self.assertIn("reusable flow", learnings)
         self.assertTrue(skill.startswith("---"))
-        self.assertEqual(engram._skill_name(skill), "deploy-vercel-site")
-
-    def test_skill_name_sanitizes_path_traversal(self):
-        # the name is model output used as a path — it must never escape the staging dir.
-        self.assertEqual(
-            engram._skill_name("name: ../../.claude/skills/evil"), "claude-skills-evil"
-        )
-        self.assertEqual(engram._skill_name("name: /etc/passwd"), "etc-passwd")
-        self.assertEqual(engram._skill_name('name: "My Cool Skill!"'), "my-cool-skill")
-        self.assertEqual(engram._skill_name("no frontmatter"), "")
+        # name parsing/sanitizing lives in skill_candidates now (tested there).
+        self.assertEqual(skill_candidates.skill_name(skill), "deploy-vercel-site")
 
     # --- end-to-end staging path (security-relevant: model output → file on disk) ---
 
     def _run_review(self, review_out, staging):
+        # Isolate BOTH dirs skill_candidates reads: the staging dir it writes to,
+        # and the install dir already_known() checks for dedup.
         with (
-            patch.object(engram, "SKILL_CANDIDATES_DIR", staging),
+            patch.object(skill_candidates, "CANDIDATES_DIR", staging),
+            patch.object(skill_candidates, "SKILLS_INSTALL_DIR", staging.parent / "installed"),
             patch.object(engram, "_ollama_generate", return_value=review_out),
             patch.object(engram, "_send_reply") as reply,
         ):
