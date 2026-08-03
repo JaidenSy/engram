@@ -38,7 +38,7 @@ models:
     # Per-role defaults (all tiers)
     roles:
       plan:      { model: "sonnet", max_turns: 25 }   # plan quality gates the whole run
-      research:  { model: "haiku",  max_turns: 20 }
+      research:  { model: "haiku",  max_turns: 35 }   # 20 was too tight — dec77da3 died at 21
       architect: { model: "opus",   max_turns: 40 }
       coder:     { model: "sonnet", max_turns: 60 }
       tester:    { model: "sonnet", max_turns: 30 }

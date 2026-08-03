@@ -213,7 +213,8 @@ if __name__ == "__main__":
             f"  {p.name:24} repo={p.repo or '—':28} notes={p.raphbrain_dir or '—':20} pr_base={p.pr_base or '—'}"
         )
     # Self-checks against known real projects.
-    assert resolve("arbiter") and resolve("arbiter").repo, "arbiter repo missing"
+    arbiter = resolve("arbiter")
+    assert arbiter and arbiter.repo, "arbiter repo missing"
     assert resolve("Vitré") is resolve("vitre"), "accent match broken"
     assert resolve("FinanceTracker") is resolve("finance-tracker"), "casing/hyphen match broken"
     assert resolve("mira") is resolve("vitre"), "alias broken"

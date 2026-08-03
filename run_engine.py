@@ -71,13 +71,13 @@ except ImportError:
     from dataclasses import dataclass
     from typing import Optional as _Opt
 
-    @dataclass  # type: ignore[no-redef]
-    class PipelineStep:
+    @dataclass
+    class PipelineStep:  # type: ignore[no-redef]
         role: str
         parallel_group: _Opt[int] = None
 
-    @dataclass  # type: ignore[no-redef]
-    class PlannerResult:
+    @dataclass
+    class PlannerResult:  # type: ignore[no-redef]
         tier: int
         project: str
         branch_name: str
