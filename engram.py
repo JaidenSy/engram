@@ -140,6 +140,113 @@ Be specific and factual. Only include what is supported by the partial output ab
         return ""
 
 
+def write_stub_handoff(
+    task: str,
+    session_name: str,
+    cause: str,
+    source_note: str = "",
+) -> str:
+    """Deterministic handoff for the two cases Ollama must never be asked to write.
+
+    (1) No partial output at all — with nothing to summarise, an 8B model
+        confabulates. Run dec77da3's handoff invented three files
+        (`compare_projected_trajectory.sh`, `determine_winner.py`,
+        `projection_data.csv`); none had ever existed, and following it would
+        have sent the next agent hunting for scripts that were never written.
+    (2) The agent wrote its own blocked note — paraphrasing a note that already
+        says exactly what's needed can only lose fidelity.
+
+    Facts only: what was asked, why it stopped, and where to look.
+    """
+    log.info(f"Writing stub handoff for: {session_name} (cause: {cause})")
+    log_hint = f"~/raphael/logs/*-{session_name}.log"
+    source_line = (
+        f"- The agent's own note (read this first): `~/Documents/RaphBrain/{source_note}`\n"
+        if source_note
+        else "- The agent wrote **no output note** — its reasoning exists only in the log.\n"
+    )
+    try:
+        HANDOFFS_DIR.mkdir(parents=True, exist_ok=True)
+        handoff_path = HANDOFFS_DIR / f"{session_name}-handoff.md"
+        handoff_path.write_text(
+            f"# Auto-Handoff — {session_name}\n"
+            f"*Written from run state — no model involved, nothing here is inferred.*\n"
+            f"*{datetime.now().strftime('%Y-%m-%d %H:%M')}*\n\n"
+            f"> **Original task:** {task[:400]}\n\n"
+            f"## Why it stopped\n{cause}\n\n"
+            f"## Where to look\n{source_line}"
+            f"- Full agent transcript: `{log_hint}`\n\n"
+            f"## How to resume\n"
+            f"Read the sources above, decide what the blocker needs, then send the\n"
+            f"corrected task to Engram again. No work is assumed to have landed on\n"
+            f"disk — verify with `git status` in the project repo before redoing it.\n"
+        )
+        log.info(f"Stub handoff written: {handoff_path}")
+        return str(handoff_path)
+    except OSError as exc:
+        log.error(f"Failed to write stub handoff: {exc}")
+        return ""
+
+
+def _tail_agent_log(task_id: str, lines: int = 10) -> str:
+    """Last few lines of a step's run-agent log, formatted for a failure reason.
+
+    An agent that writes no output note still leaves its reasoning here, and
+    that text is normally the actual explanation — dec77da3's "research failed"
+    was really "the agent asked which branch to use and waited". Returns "" when
+    there is no log, so callers can concatenate it unconditionally.
+    """
+    if not task_id:
+        return ""
+    log_dir = Path.home() / "raphael" / "logs"
+    matches = sorted(log_dir.glob(f"*-{task_id}.log"))
+    if not matches:
+        return ""
+    try:
+        content = matches[-1].read_text()
+    except OSError:
+        return ""
+    tail = [ln for ln in content.splitlines() if ln.strip()][-lines:]
+    if not tail:
+        return ""
+    return "\n\nAgent's last output:\n" + "\n".join(tail)[-800:]
+
+
+def read_blocked_section(output_note: str) -> str:
+    """Return an agent's `## Blocked` text, or "" if it did not declare blocked.
+
+    Recognises either marker the prompt asks for: a `## Blocked` heading, or
+    `**Status:** blocked` inside the handoff. Blocked is a terminal state for
+    the run — the pipeline must NOT advance a coder onto a plan that says it
+    cannot proceed.
+    """
+    note_path = Path.home() / "Documents" / "RaphBrain" / output_note
+    try:
+        text = note_path.read_text()
+    except OSError:
+        return ""
+
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().lower().startswith("## blocked"):
+            body: list[str] = []
+            for nxt in lines[i + 1 :]:
+                if nxt.startswith("## "):
+                    break
+                body.append(nxt)
+            section = "\n".join(body).strip()
+            if section:
+                return section[:1200]
+
+    # Exact-line match only. The handoff template itself prints
+    # "**Status:** done | partial | blocked", so a substring test would flag
+    # every agent that pasted the template without filling it in.
+    for line in lines:
+        if line.strip().lower() == "**status:** blocked":
+            return "Agent reported Status: blocked (no ## Blocked section — read the note)."
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Handoff lifecycle — a failed step already writes a resume handoff; these let
 # Jaiden actually work through them from the phone (list → resume → archive)
@@ -718,28 +825,38 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, engram_co
         engine.mark_step_started(run_id, idx, task_id)
         log.info(f"[orchestrate] Step {idx} ({role}) dispatched as task {task_id}")
 
-        def _finalize_step_failure(reason: str) -> None:
+        def _finalize_step_failure(reason: str, agent_blocked: bool = False) -> None:
             """Terminal failure for this step: mark it failed, write a resume
             handoff from whatever partial output exists, and text Jaiden a clear
             next step. Runs for EVERY terminal failure (validation, agent-failed,
-            timeout, rate-limit) — so work is never lost, a fresh subagent can
-            always pick up where this one died, and Jaiden can hand back a
-            workaround instead of the run just going dark."""
+            timeout, rate-limit, blocked) — so work is never lost, a fresh
+            subagent can always pick up where this one died, and Jaiden can hand
+            back a workaround instead of the run just going dark."""
             engine.mark_step_failed(run_id, idx, reason=reason)
             handoff_path = ""
             try:
-                output_note = engine._read_task_output_note(task_id) if task_id else ""
+                output_note = (engine._read_task_output_note(task_id) if task_id else "") or ""
                 partial_output = ""
                 if output_note:
                     note_path = Path.home() / "Documents" / "RaphBrain" / output_note
                     if note_path.exists():
                         partial_output = note_path.read_text()
-                handoff_path = write_handoff_via_ollama(
-                    task=run_snapshot.get("task_raw", ""),
-                    session_name=task_id or f"{run_id}-step{idx}",
-                    partial_output=partial_output,
-                    cause=reason,
-                )
+                # Only summarise when there is something real to summarise and the
+                # agent hasn't already said it better itself — see write_stub_handoff.
+                if partial_output.strip() and not agent_blocked:
+                    handoff_path = write_handoff_via_ollama(
+                        task=run_snapshot.get("task_raw", ""),
+                        session_name=task_id or f"{run_id}-step{idx}",
+                        partial_output=partial_output,
+                        cause=reason,
+                    )
+                else:
+                    handoff_path = write_stub_handoff(
+                        task=run_snapshot.get("task_raw", ""),
+                        session_name=task_id or f"{run_id}-step{idx}",
+                        cause=reason,
+                        source_note=output_note if partial_output.strip() else "",
+                    )
                 # Mirror into the project's agents/ folder so the next fresh agent
                 # finds it during its RaphBrain scan.
                 if handoff_path and run_snapshot.get("project"):
@@ -786,7 +903,21 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, engram_co
                     log.error(
                         f"[orchestrate] Schema validation failed step {idx} ({role}): {reason}"
                     )
-                    _finalize_step_failure(f"Output schema validation failed: {reason}")
+                    # "output note not found" on its own says nothing about WHY the
+                    # agent wrote nothing. Its last words are in the run log, and
+                    # they are usually the whole answer (dec77da3: it was asking a
+                    # question). Carry them into the failure Jaiden actually reads.
+                    _finalize_step_failure(
+                        f"Output schema validation failed: {reason}{_tail_agent_log(task_id)}"
+                    )
+                    return
+
+                # A step that declared itself blocked is terminal: never advance
+                # the pipeline onto a plan that says it cannot proceed.
+                blocked = read_blocked_section(output_path)
+                if blocked:
+                    log.warning(f"[orchestrate] Step {idx} ({role}) reported BLOCKED")
+                    _finalize_step_failure(f"🚫 BLOCKED by {role}:\n{blocked}", agent_blocked=True)
                     return
 
             pr_url = None

@@ -39,6 +39,34 @@ CONFIG_PATH = _BASE / "config" / "config.yaml"
 # Used when config.yaml is missing or has no agent_models section
 DEFAULT_MODEL_ROUTE = {"model": "sonnet", "max_turns": 60}
 
+# A step that died on max_turns dies again at the same budget — re-running the
+# identical prompt with the identical ceiling is not a retry, it's a repeat
+# (run dec77da3 step 1: research burned 21/20 turns, retried, got nowhere).
+# Each retry doubles the turn budget instead.
+RETRY_TURN_MULTIPLIER = 2
+RETRY_MAX_TURNS_CAP = 120  # nothing legitimate needs more; a runaway loop does
+
+# Appended to every step prompt. A step that stops to ask Jaiden a question is a
+# step that dies silently: run-agent.sh only ever reads the output note, the
+# agent's final message goes nowhere, and the run fails as "output note not
+# found" — which says nothing about the real blocker (run dec77da3, 2026-08-02,
+# where the research step correctly spotted two blockers and was thrown away for
+# it). Blocked is a legitimate outcome; it just has to be written down.
+BLOCKED_PROTOCOL = """## If you get blocked
+
+Hitting a blocker is a valid result. **Stopping to ask a question is not** —
+nothing in this pipeline can answer you, and your final message is discarded
+unread. So when you hit one:
+
+1. Finish every part of the task that is **not** blocked first.
+2. Write the output note anyway — with what you found, and what is blocked.
+3. Put `**Status:** blocked` in your `## Handoff` section, and add a top-level
+   `## Blocked` section naming the exact decision needed and the options you see.
+
+The run then stops cleanly at your step and Jaiden is texted your `## Blocked`
+section verbatim. Writing no note throws away all your work and tells him
+nothing — that failure mode is why this section exists."""
+
 log = logging.getLogger("engram")
 
 # ── Model availability / auto-downgrade ─────────────────────────────────────────
@@ -306,6 +334,12 @@ class AgentRunner:
         project = run["project"]
         tier = run.get("tier", 2)
         route = resolve_model_route(role, tier)
+        # Escalate the turn budget on every retry — see RETRY_TURN_MULTIPLIER.
+        retry_count = step.get("retry_count", 0)
+        max_turns = min(
+            int(route["max_turns"]) * RETRY_TURN_MULTIPLIER**retry_count,
+            RETRY_MAX_TURNS_CAP,
+        )
 
         # Resolve repo path + RaphBrain folder via the registry (single source of
         # truth). Unknown project → best-guess path that fail-loud catches downstream.
@@ -325,7 +359,7 @@ class AgentRunner:
             "project": project,
             "tier": tier,
             "model": route["model"],
-            "max_turns": route["max_turns"],
+            "max_turns": max_turns,
             "repo": repo_path,
             "depends_on": [],
             "handoff_required": role not in ("deployer",),
@@ -385,6 +419,8 @@ class AgentRunner:
             f"## Task\n{task_description}",
             "---",
             f"## Output\nWrite your full output to:\n`~/Documents/RaphBrain/{output_note}`",
+            "---",
+            BLOCKED_PROTOCOL,
         ]
         return "\n\n".join(parts)
 
