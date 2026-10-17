@@ -56,3 +56,43 @@ models:
         plan:      { model: "opus",  max_turns: 30 }
         architect: { model: "fable", max_turns: 40 }
         review:    { model: "fable", max_turns: 35 }
+
+# ── Per-run isolation (worktree.py) ─────────────────────────────────────────
+# Each pipeline run gets its own checkout:
+#   git worktree add <repo>/.engram-worktrees/<run_id> -b <branch> origin/<pr_base>
+# Every step runs there; it is removed on done/failed/aborted (branch kept,
+# uncommitted leftovers stashed). Orphans are swept at daemon startup.
+worktrees:
+  enabled: true
+  root: ""            # "" → <repo>/.engram-worktrees; else <root>/<repo-name>/<run_id>
+
+runs:
+  # One active run at a time. Worktrees make concurrent runs possible, but
+  # abort/status still assume one live run, so keep this on for now.
+  # Forced on whenever worktrees.enabled is false.
+  single_active_run: true
+
+# ── Tracing / telemetry (tracing.py) ────────────────────────────────────────
+# Every run is a W3C trace; every step's `claude -p` gets
+# TRACEPARENT=00-<run trace_id>-<step span_id>-01, so Claude Code's own spans
+# (when its telemetry is on) parent under the run. trace_id lands in the run
+# JSON and ledger.jsonl.
+telemetry:
+  propagate_traceparent: true
+  claude_code:
+    enabled: false              # → CLAUDE_CODE_ENABLE_TELEMETRY=1 + OTEL_{METRICS,LOGS}_EXPORTER
+    enhanced_traces_beta: false # → CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1 + OTEL_TRACES_EXPORTER
+    otlp_endpoint: ""           # → OTEL_EXPORTER_OTLP_ENDPOINT, e.g. http://localhost:4318
+    otlp_protocol: "http/protobuf"
+    metrics_exporter: "otlp"
+    logs_exporter: "otlp"
+    traces_exporter: "otlp"
+    resource_attributes: ""     # appended to OTEL_RESOURCE_ATTRIBUTES (engram.run_id/role always set)
+    extra_env: {}               # any other non-secret env for the agent process
+  # Names of env vars copied from the daemon's environment into the agent's tmux
+  # session only (never written to the task JSON). Use for secrets, e.g.
+  # OTEL_EXPORTER_OTLP_HEADERS.
+  passthrough_env: []
+  # Emit Engram's own invoke_workflow / invoke_agent spans. Needs
+  # `pip install opentelemetry-sdk opentelemetry-exporter-otlp`; silently off without it.
+  engram_spans: false

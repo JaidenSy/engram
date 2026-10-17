@@ -1,21 +1,28 @@
 """
 run_engine.py — RunEngine for Engram Mission Control.
 
-Manages run state files in ~/engram/runs/, handles pipeline advancement,
-parallel group dispatching, file-locked writes, and step polling.
+Manages run state files in ~/engram/runs/: creation, atomic read-modify-write
+updates (update_run), step state transitions, abort, startup recovery, and step
+polling. The pipeline driver itself lives in engram._run_pipeline.
 """
 
-import fcntl
 import json
 import logging
+import os
 import re
 import subprocess
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Iterator, Optional
+
+try:  # POSIX (the Mac Mini, CI). Absent on Windows → in-process lock only.
+    import fcntl
+except ImportError:  # pragma: no cover - exercised only on Windows dev boxes
+    fcntl = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -48,6 +55,7 @@ def _append_ledger(data: dict) -> None:
                         "status": data.get("status"),
                         "created_at": data.get("created_at"),
                         "completed_at": data.get("completed_at"),
+                        "trace_id": data.get("trace_id"),
                         "pipeline": [
                             {"role": s.get("role"), "status": s.get("status")}
                             for s in data.get("pipeline", [])
@@ -87,6 +95,75 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
+# Locking + atomic writes
+# ---------------------------------------------------------------------------
+
+# One in-process lock per run id. flock alone would also serialise threads
+# (each open() is its own open file description on Linux/macOS), but the
+# threading lock keeps this correct on platforms without fcntl, and is cheap.
+_RUN_LOCKS: dict = {}
+_RUN_LOCKS_GUARD = threading.Lock()
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@contextmanager
+def _run_lock(run_id: str) -> Iterator[None]:
+    """Exclusive lock for one run, held across a whole read-modify-write.
+
+    The flock is taken on a sidecar `.{run_id}.lock` file, NOT on the run JSON
+    itself: the JSON is replaced by rename on every write, so a lock on its
+    inode would protect a file nobody reads any more.
+    """
+    with _RUN_LOCKS_GUARD:
+        tlock = _RUN_LOCKS.setdefault(run_id, threading.Lock())
+    with tlock:
+        if fcntl is None:
+            yield
+            return
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        with open(RUNS_DIR / f".{run_id}.lock", "a+") as lf:
+            deadline = time.monotonic() + RUN_FILE_LOCK_TIMEOUT_S
+            while True:
+                try:
+                    fcntl.flock(lf.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        log.warning(
+                            "Run %s lock still held after %ss — blocking",
+                            run_id,
+                            RUN_FILE_LOCK_TIMEOUT_S,
+                        )
+                        # A stall beats writing unlocked and losing an update.
+                        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+                        break
+                    time.sleep(0.05)
+            try:
+                yield
+            finally:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    """Write JSON to a temp file in the same dir, fsync, then os.replace() it
+    over the target: readers see the old file or the new one, never a torn
+    one. The temp name doesn't end in .json, so RUNS_DIR globs skip it."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with open(tmp, "w") as f:
+            f.write(json.dumps(data, indent=2))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+# ---------------------------------------------------------------------------
 # RunEngine
 # ---------------------------------------------------------------------------
 
@@ -97,8 +174,11 @@ class RunEngine:
 
     Each run file: ~/engram/runs/{YYYY-MM-DD-HHMMSS}-{8-char-hex}.json
 
-    Thread safety: all writes acquire an exclusive fcntl lock on the file.
-    Reads are lockless (acceptable stale-read semantics inside poll loops).
+    Thread safety: every mutation goes through update_run(), which holds the
+    run's lock (in-process threading.Lock + cross-process fcntl.flock on a
+    sidecar lock file) across the whole read -> mutate -> write, and publishes
+    the new state with an atomic temp-file rename. Reads are lockless: thanks to
+    the rename they always see a complete file, just possibly a stale one.
     """
 
     def __init__(self):
@@ -117,16 +197,21 @@ class RunEngine:
     # Public API
     # ------------------------------------------------------------------
 
-    def create_run(self, task_raw: str, result: "PlannerResult") -> dict:
+    def create_run(
+        self, task_raw: str, result: "PlannerResult", single_active: bool = True
+    ) -> dict:
         """
         Creates a run JSON file with status=pending.
 
-        Raises RuntimeError if another run is already active (status=running).
+        Raises RuntimeError if another run is already active (status=running)
+        and single_active is True (the default — see runs.single_active_run in
+        config.yaml; only safe to turn off once every run has its own worktree).
         Returns the full run dict.
         """
-        active = self.get_active_run()
-        if active:
-            raise RuntimeError(f"Run {active['id']!r} is already active — abort it first")
+        if single_active:
+            active = self.get_active_run()
+            if active:
+                raise RuntimeError(f"Run {active['id']!r} is already active — abort it first")
 
         RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -160,9 +245,13 @@ class RunEngine:
             "created_at": now_iso,
             "completed_at": None,
             "pr_url": None,
+            # Filled in by the pipeline thread (worktree.py / tracing.py).
+            "worktree": None,
+            "trace_id": None,
+            "span_id": None,
         }
 
-        (RUNS_DIR / filename).write_text(json.dumps(run, indent=2))
+        _atomic_write_json(RUNS_DIR / filename, run)
         log.info(
             "Run created: id=%s project=%s tier=%d branch=%s steps=%d",
             run_id,
@@ -173,96 +262,24 @@ class RunEngine:
         )
         return run
 
-    def start_run(self, run_id: str) -> None:
+    def update_run(self, run_id: str, fn: Callable[[dict], Optional[dict]]) -> dict:
         """
-        Sets status=running, then drives advance_pipeline() until the run
-        reaches a terminal state.
+        Atomic read-modify-write of one run: holds the run lock across the read,
+        fn(run) and the write, so two threads mutating different steps of the same
+        run (a parallel group) can never drop each other's update.
 
-        This method BLOCKS until the run completes, fails, or is aborted.
-        Callers that need non-blocking behaviour must wrap this in a thread:
-            t = threading.Thread(target=engine.start_run, args=(run_id,), daemon=True)
-            t.start()
+        fn mutates the dict in place (or returns a replacement dict). It runs under
+        the lock, so keep it fast and side-effect free (no subprocesses, no network).
+        Returns the state as written.
         """
-        run = self.get_run(run_id)
-        if run["status"] != "pending":
-            log.warning(
-                "start_run called on run %s with status=%s — ignoring",
-                run_id,
-                run["status"],
-            )
-            return
-
-        self._update_run_field(run_id, "status", "running")
-        log.info("Run started: %s", run_id)
-        self.advance_pipeline(run_id)
-
-    def advance_pipeline(self, run_id: str) -> None:
-        """
-        Finds the next pending step(s) and dispatches them.
-
-        - Sequential step (parallel_group=None): dispatched inline; blocks until done.
-        - Parallel group: all same-group steps dispatched in threads; waits for all.
-        - After all steps finish: marks run done or failed.
-        """
-        run = self.get_run(run_id)
-
-        if run["status"] in ("failed", "aborted", "done"):
-            log.debug(
-                "advance_pipeline: run %s is terminal (%s) — stopping",
-                run_id,
-                run["status"],
-            )
-            return
-
-        pipeline = run["pipeline"]
-        next_steps = self._find_next_pending_steps(pipeline)
-
-        if not next_steps:
-            # No more pending steps — finalise the run
-            any_failed = any(s["status"] == "failed" for s in pipeline)
-            final_status = "failed" if any_failed else "done"
-            self._update_run_fields(
-                run_id,
-                {
-                    "status": final_status,
-                    "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                },
-            )
-            log.info("Run %s complete — status=%s", run_id, final_status)
-            return
-
-        if len(next_steps) == 1:
-            idx, step = next_steps[0]
-            log.info(
-                "Dispatching sequential step [%d] role=%s run=%s",
-                idx,
-                step["role"],
-                run_id,
-            )
-            self._dispatch_and_wait(run_id, idx, step)
-        else:
-            log.info(
-                "Dispatching parallel group (%d steps) run=%s: %s",
-                len(next_steps),
-                run_id,
-                [s["role"] for _, s in next_steps],
-            )
-            threads = []
-            for idx, step in next_steps:
-                t = threading.Thread(
-                    target=self._dispatch_and_wait,
-                    args=(run_id, idx, step),
-                    daemon=True,
-                    name=f"engram-step-{run_id}-{idx}",
-                )
-                threads.append(t)
-                t.start()
-            for t in threads:
-                t.join()
-            log.info("Parallel group finished for run %s", run_id)
-
-        # Recurse to pick up the next step(s) in the pipeline
-        self.advance_pipeline(run_id)
+        with _run_lock(run_id):
+            path = self._run_path(run_id)
+            run = json.loads(path.read_text())
+            replaced = fn(run)
+            if replaced is not None:
+                run = replaced
+            _atomic_write_json(path, run)
+            return run
 
     def mark_step_done(
         self,
@@ -275,15 +292,18 @@ class RunEngine:
         Sets pipeline[step_index].status=done, completed_at=now.
         Optionally records output_path and pr_url on the run.
         """
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        run = self.get_run(run_id)
-        run["pipeline"][step_index]["status"] = "done"
-        run["pipeline"][step_index]["completed_at"] = now
-        if output_path is not None:
-            run["pipeline"][step_index]["output_path"] = output_path
-        if pr_url is not None:
-            run["pr_url"] = pr_url
-        self._write_run(run_id, run)
+        now = _now_iso()
+
+        def _mut(run: dict) -> None:
+            step = run["pipeline"][step_index]
+            step["status"] = "done"
+            step["completed_at"] = now
+            if output_path is not None:
+                step["output_path"] = output_path
+            if pr_url is not None:
+                run["pr_url"] = pr_url
+
+        run = self.update_run(run_id, _mut)
         log.info(
             "Step %d done — run=%s role=%s",
             step_index,
@@ -294,17 +314,22 @@ class RunEngine:
     def mark_step_failed(self, run_id: str, step_index: int, reason: Optional[str] = None) -> None:
         """
         Sets pipeline[step_index].status=failed and run.status=failed.
-        Stops pipeline advancement (caller must not call advance_pipeline after this).
+        Stops pipeline advancement. An aborted run stays aborted: the abort is
+        the user's decision and outranks the failure it caused (a killed session).
         """
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        run = self.get_run(run_id)
-        run["pipeline"][step_index]["status"] = "failed"
-        run["pipeline"][step_index]["completed_at"] = now
-        if reason:
-            run["pipeline"][step_index]["reason"] = reason
-        run["status"] = "failed"
-        run["completed_at"] = now
-        self._write_run(run_id, run)
+        now = _now_iso()
+
+        def _mut(run: dict) -> None:
+            step = run["pipeline"][step_index]
+            step["status"] = "failed"
+            step["completed_at"] = now
+            if reason:
+                step["reason"] = reason
+            if run.get("status") != "aborted":
+                run["status"] = "failed"
+                run["completed_at"] = now
+
+        run = self.update_run(run_id, _mut)
         log.error(
             "Step %d FAILED — run=%s role=%s reason=%s",
             step_index,
@@ -319,13 +344,16 @@ class RunEngine:
         re-dispatch it.  Increments retry_count so the caller can enforce
         a retry cap.  Does NOT change run-level status.
         """
-        run = self.get_run(run_id)
+
+        def _mut(run: dict) -> None:
+            step = run["pipeline"][step_index]
+            step["retry_count"] = step.get("retry_count", 0) + 1
+            step["status"] = "pending"
+            step["task_id"] = None
+            step["started_at"] = None
+
+        run = self.update_run(run_id, _mut)
         step = run["pipeline"][step_index]
-        step["retry_count"] = step.get("retry_count", 0) + 1
-        step["status"] = "pending"
-        step["task_id"] = None
-        step["started_at"] = None
-        self._write_run(run_id, run)
         log.info(
             "Step %d reset for retry (attempt %d) — run=%s role=%s",
             step_index,
@@ -338,7 +366,7 @@ class RunEngine:
         """
         Scans RUNS_DIR for a run with status=running.
         Returns the first match, or None.
-        Only one active run is enforced by create_run().
+        Only one active run is enforced by create_run() (unless single_active=False).
         """
         for path in sorted(RUNS_DIR.glob("*.json")):
             try:
@@ -354,26 +382,34 @@ class RunEngine:
         Sets run.status=aborted.
         Kills tmux sessions for any running steps (raphael-{task_id}).
         Sets running/pending steps to skipped.
+
+        State is committed first (under the lock) and sessions are killed after,
+        so the pipeline thread, which notices the dead session, also sees
+        `aborted` and stands down instead of retrying. Worktree cleanup is the
+        pipeline thread's job (its finally block), or startup recovery's.
         """
-        run = self.get_run(run_id)
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        now = _now_iso()
+        to_kill: list = []
 
-        for step in run["pipeline"]:
-            if step["status"] == "running" and step.get("task_id"):
-                session = f"raphael-{step['task_id']}"
-                log.info("Killing tmux session: %s", session)
-                subprocess.run(
-                    ["tmux", "kill-session", "-t", session],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                step["status"] = "skipped"
-            elif step["status"] == "pending":
-                step["status"] = "skipped"
+        def _mut(run: dict) -> None:
+            for step in run["pipeline"]:
+                if step["status"] == "running" and step.get("task_id"):
+                    to_kill.append(step["task_id"])
+                    step["status"] = "skipped"
+                elif step["status"] == "pending":
+                    step["status"] = "skipped"
+            run["status"] = "aborted"
+            run["completed_at"] = now
 
-        run["status"] = "aborted"
-        run["completed_at"] = now
-        self._write_run(run_id, run)
+        self.update_run(run_id, _mut)
+        for task_id in to_kill:
+            session = f"raphael-{task_id}"
+            log.info("Killing tmux session: %s", session)
+            subprocess.run(
+                ["tmux", "kill-session", "-t", session],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         log.info("Run aborted: %s", run_id)
 
     def get_run(self, run_id: str) -> dict:
@@ -501,6 +537,7 @@ class RunEngine:
                     continue
                 _append_ledger(data)  # preserve the outcome signal before deleting
                 path.unlink()
+                (RUNS_DIR / f".{data.get('id')}.lock").unlink(missing_ok=True)
                 deleted += 1
                 log.debug("Cleanup: deleted old run %s (%s)", data.get("id"), path.name)
             except Exception:
@@ -533,7 +570,7 @@ class RunEngine:
                     step["status"] = "skipped"
             data["status"] = "aborted"
             data["completed_at"] = now
-            path.write_text(json.dumps(data, indent=2))
+            _atomic_write_json(path, data)
             log.warning(
                 "Startup recovery: aborted stale run %s (was %s)",
                 data.get("id"),
@@ -565,112 +602,20 @@ class RunEngine:
 
         return []
 
-    def _dispatch_and_wait(self, run_id: str, step_index: int, step: dict) -> None:
-        """
-        Marks a step as running, polls for its task completion, then marks
-        it done or failed.
-
-        This method is called directly for sequential steps, or as the thread
-        target for parallel steps.
-
-        Note: The actual task_id must already be set on the step before polling
-        begins. This method checks if the step has a task_id; if not, it marks
-        the step failed (caller — typically agent_runner — should set task_id via
-        mark_step_started() before poll_step_completion is meaningful).
-
-        For now, _dispatch_and_wait handles the state transitions. The actual
-        dispatching of the agent subprocess is delegated to AgentRunner
-        (agent_runner.py), which should call back into RunEngine to set task_id
-        and started_at, then poll_step_completion() to wait.
-
-        Standalone behaviour (used when agent_runner is not integrated):
-        If step["task_id"] is already set (pre-populated), goes straight to polling.
-        If task_id is None, logs a warning and marks step failed.
-        """
-        # Mark step as running
-        self._mark_step_running(run_id, step_index)
-
-        task_id = step.get("task_id")
-        if not task_id:
-            log.warning(
-                "Step %d (role=%s) has no task_id — cannot poll; marking failed. "
-                "AgentRunner should call mark_step_started() with task_id before calling advance_pipeline.",
-                step_index,
-                step.get("role"),
-            )
-            self.mark_step_failed(
-                run_id,
-                step_index,
-                reason="task_id not set — AgentRunner did not populate it before pipeline advanced",
-            )
-            return
-
-        final_status = self.poll_step_completion(run_id, step_index, task_id)
-
-        if final_status == "done" or final_status == "needs-review":
-            # needs-review: treat as done with a warning (review role will catch issues)
-            if final_status == "needs-review":
-                log.warning(
-                    "Step %d (role=%s) task=%s ended with needs-review — "
-                    "treating as done; review role should catch any issues.",
-                    step_index,
-                    step.get("role"),
-                    task_id,
-                )
-            # Attempt to extract output_path from the task file
-            output_path = self._read_task_output_note(task_id)
-            # Attempt to extract pr_url if this is a deployer step
-            pr_url = None
-            if step.get("role") == "deployer" and output_path:
-                pr_url = self._extract_pr_url(output_path)
-            self.mark_step_done(run_id, step_index, output_path=output_path, pr_url=pr_url)
-
-        elif final_status in ("failed", "rate-limited", "timeout"):
-            reason_map = {
-                "failed": "Agent task reported failed",
-                "rate-limited": "Claude Code rate-limited — retry manually after reset",
-                "timeout": f"Step exceeded {STEP_TIMEOUT_S}s hard timeout",
-            }
-            self.mark_step_failed(
-                run_id,
-                step_index,
-                reason=reason_map.get(final_status, final_status),
-            )
-        else:
-            # Unknown terminal status
-            log.error(
-                "Unknown terminal status %r for step %d run=%s — marking failed",
-                final_status,
-                step_index,
-                run_id,
-            )
-            self.mark_step_failed(run_id, step_index, reason=f"Unknown status: {final_status}")
-
-    def _mark_step_running(self, run_id: str, step_index: int) -> None:
-        """Sets pipeline[step_index].status=running, started_at=now."""
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        run = self.get_run(run_id)
-        run["pipeline"][step_index]["status"] = "running"
-        run["pipeline"][step_index]["started_at"] = now
-        self._write_run(run_id, run)
-        log.info(
-            "Step %d running — run=%s role=%s",
-            step_index,
-            run_id,
-            run["pipeline"][step_index]["role"],
-        )
-
     def mark_step_started(self, run_id: str, step_index: int, task_id: str) -> None:
         """
         Called by AgentRunner after dispatching the agent subprocess.
         Sets task_id and started_at on the step, status=running.
         """
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        run = self.get_run(run_id)
-        run["pipeline"][step_index]["task_id"] = task_id
-        run["pipeline"][step_index]["status"] = "running"
-        run["pipeline"][step_index]["started_at"] = now
-        self._write_run(run_id, run)
+        now = _now_iso()
+
+        def _mut(run: dict) -> None:
+            step = run["pipeline"][step_index]
+            step["task_id"] = task_id
+            step["status"] = "running"
+            step["started_at"] = now
+
+        run = self.update_run(run_id, _mut)
         log.info(
             "Step %d started — run=%s role=%s task_id=%s",
             step_index,
@@ -679,18 +624,21 @@ class RunEngine:
             task_id,
         )
 
+    def update_step_fields(self, run_id: str, step_index: int, fields: dict) -> None:
+        """Atomically merge fields into pipeline[step_index] (e.g. trace ids)."""
+
+        def _mut(run: dict) -> None:
+            run["pipeline"][step_index].update(fields)
+
+        self.update_run(run_id, _mut)
+
     def _update_run_field(self, run_id: str, field: str, value) -> None:
         """Atomically update a single top-level field on a run."""
-        run = self.get_run(run_id)
-        run[field] = value
-        self._write_run(run_id, run)
+        self._update_run_fields(run_id, {field: value})
 
     def _update_run_fields(self, run_id: str, fields: dict) -> None:
         """Atomically update multiple top-level fields on a run."""
-        run = self.get_run(run_id)
-        for k, v in fields.items():
-            run[k] = v
-        self._write_run(run_id, run)
+        self.update_run(run_id, lambda run: run.update(fields))
         log.info("Run %s updated fields: %s", run_id, list(fields.keys()))
 
     def _run_path(self, run_id: str) -> Path:
@@ -698,10 +646,10 @@ class RunEngine:
         Finds the file path for a given run_id.
         Raises FileNotFoundError if not found.
         """
-        for path in RUNS_DIR.glob("*.json"):
+        # Fast path first: create_run names files {ts}-{run_id}.json.
+        candidates = list(RUNS_DIR.glob(f"*-{run_id}.json")) + list(RUNS_DIR.glob("*.json"))
+        for path in candidates:
             try:
-                # Fast check: ID is the last 8 chars of the stem before extension
-                # Full validation: parse JSON to be safe
                 data = json.loads(path.read_text())
                 if data.get("id") == run_id:
                     return path
@@ -711,24 +659,13 @@ class RunEngine:
 
     def _write_run(self, run_id: str, run_data: dict) -> None:
         """
-        Writes run_data to the run file using POSIX exclusive file locking
-        (fcntl.LOCK_EX) to prevent concurrent write corruption.
+        Blind overwrite of a run under its lock. Prefer update_run(): a caller
+        that did get_run() -> mutate -> _write_run() can still lose a concurrent
+        update, because its read happened outside the lock. Kept for callers
+        that genuinely replace the whole state.
         """
-        path = self._run_path(run_id)
-        with open(path, "r+") as f:
-            try:
-                # Non-blocking first attempt
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                # Brief sleep then blocking retry
-                time.sleep(0.1)
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                f.seek(0)
-                f.write(json.dumps(run_data, indent=2))
-                f.truncate()
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        with _run_lock(run_id):
+            _atomic_write_json(self._run_path(run_id), run_data)
 
     def _read_task_output_note(self, task_id: str) -> Optional[str]:
         """

@@ -26,6 +26,7 @@ from typing import Optional
 
 import yaml
 
+import tracing
 from project_registry import pr_base, resolve as resolve_project
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
@@ -131,6 +132,15 @@ def probe_models() -> dict:
 def apply_downgrade(model: str) -> str:
     """Substitute an unavailable alias per the startup probe. No-op if all healthy."""
     return _ALIAS_DOWNGRADE.get(model, model)
+
+
+def _load_config() -> dict:
+    """config.yaml as a dict ({} if missing/unreadable)."""
+    try:
+        with open(CONFIG_PATH) as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
 
 
 def resolve_model_route(role: str, tier: int) -> dict:
@@ -279,12 +289,19 @@ class AgentRunner:
             prompt_file=str(prompt_file).replace(str(Path.home()), "~"),
             task_description=task_description,
         )
+        secret_env = self._apply_run_isolation(task, step, run)
         task_file = TASKS_DIR / f"{task_id}.json"
         task_file.write_text(json.dumps(task, indent=2))
         log.info(f"[agent_runner] Task JSON written: {task_file}")
 
-        # Spawn run-agent.sh (non-blocking tmux session)
-        self._spawn_run_agent(task_id, task_file)
+        # Spawn run-agent.sh (non-blocking tmux session) in the run's worktree,
+        # with the step's trace context + telemetry env.
+        self._spawn_run_agent(
+            task_id,
+            task_file,
+            cwd=task["repo"],
+            env={**task.get("env", {}), **secret_env},
+        )
         log.info(f"[agent_runner] Spawned tmux session raphael-{task_id} for role={role}")
 
         return task_id
@@ -340,6 +357,28 @@ class AgentRunner:
             "engram_step_role": role,
         }
 
+    def _apply_run_isolation(self, task: dict, step: dict, run: dict) -> dict:
+        """Point the task at the run's worktree and attach its trace env.
+
+        - task["repo"] becomes the run's worktree (when one was created), so
+          run-agent.sh cds there; the real repo stays in task["main_repo"].
+        - task["env"] = TRACEPARENT (+ Claude Code OTel vars when configured);
+          trace_id / span_id are copied for run-agent.sh logging.
+        Returns the secret passthrough env (never persisted to the task JSON).
+        """
+        worktree = run.get("worktree")
+        if worktree:
+            task["main_repo"] = task["repo"]
+            task["repo"] = worktree
+        trace_id, span_id = run.get("trace_id"), step.get("span_id")
+        env, secret_env = tracing.step_env(
+            _load_config(), trace_id, span_id, run_id=run.get("id", ""), role=step.get("role", "")
+        )
+        task["env"] = env
+        task["trace_id"] = trace_id
+        task["span_id"] = span_id
+        return secret_env
+
     # ------------------------------------------------------------------
     # Prompt construction
     # ------------------------------------------------------------------
@@ -369,6 +408,13 @@ class AgentRunner:
 
         # 4. Branch instruction (injected for all roles; critical for coder)
         branch_section = f"## Branch\nWork on: `{branch}`\nNever commit to `main` or `develop`.\n"
+        if run.get("worktree"):
+            branch_section += (
+                f"Your working directory is this run's own git worktree "
+                f"(`{run['worktree']}`), already on `{branch}`. Stay in it: do not `cd` "
+                "to the main checkout or switch branches. Commit and push from here; "
+                "the worktree is removed when the run ends (the branch is kept).\n"
+            )
 
         parts = [
             role_prompt,
@@ -469,7 +515,13 @@ class AgentRunner:
     # tmux spawning
     # ------------------------------------------------------------------
 
-    def _spawn_run_agent(self, task_id: str, task_file: Path) -> None:
+    def _spawn_run_agent(
+        self,
+        task_id: str,
+        task_file: Path,
+        cwd: Optional[str] = None,
+        env: Optional[dict] = None,
+    ) -> None:
         """
         Spawns run-agent.sh in a new detached tmux session named
         'raphael-{task_id}'.  This matches the abort pattern used by
@@ -479,21 +531,18 @@ class AgentRunner:
         run-agent.sh does NOT create its own tmux session — it invokes
         `claude -p` directly.  This outer tmux session IS the container;
         killing it kills the claude process.
+
+        cwd → `-c` (the run's worktree); env → one `-e KEY=VAL` per var
+        (tmux >= 3.0), inherited by run-agent.sh and so by `claude -p`.
         """
         session_name = f"raphael-{task_id}"
         safe_path = str(task_file)
-        cmd = [
-            "tmux",
-            "new-session",
-            "-d",
-            "-s",
-            session_name,
-            "-x",
-            "220",
-            "-y",
-            "50",
-            f"zsh {RUN_AGENT} {safe_path} ; echo RAPHAEL_DONE",
-        ]
+        cmd = ["tmux", "new-session", "-d", "-s", session_name, "-x", "220", "-y", "50"]
+        if cwd and Path(cwd).expanduser().is_dir():
+            cmd += ["-c", str(Path(cwd).expanduser())]
+        for key, value in (env or {}).items():
+            cmd += ["-e", f"{key}={value}"]
+        cmd.append(f"zsh {RUN_AGENT} {safe_path} ; echo RAPHAEL_DONE")
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(
