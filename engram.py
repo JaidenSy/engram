@@ -22,8 +22,10 @@ from planner import classify_task, PlannerResult
 from run_engine import RunEngine
 from agent_runner import AgentRunner, probe_models, apply_downgrade
 from output_validator import validate_step_output
-from project_registry import project_map_text, project_names, resolve as resolve_project
+from project_registry import pr_base, project_map_text, project_names, resolve as resolve_project
 from scaffold_project import run_scaffold
+import tracing  # noqa: E402  (per-run trace context → TRACEPARENT for every step)
+import worktree  # noqa: E402  (per-run git worktree isolation)
 import scheduler  # noqa: E402  (used by the schedule commands + Scheduler thread in main)
 import skill_candidates  # noqa: E402  (skills/promote/reject cmds + spawn_post_task_review)
 
@@ -686,7 +688,170 @@ def _send_reply(config: dict, message: str) -> None:
     _send_telegram(token, tcfg["chat_id"], message)
 
 
+def _single_active_run(config: Optional[dict]) -> bool:
+    """One-run-at-a-time guard (runs.single_active_run, default on). Always on
+    when worktrees are off: runs would share, and dirty, one working tree."""
+    if not worktree.enabled(config):
+        return True
+    return bool(((config or {}).get("runs") or {}).get("single_active_run", True))
+
+
+def _prepare_run_isolation(run_id: str, engine: RunEngine, engram_config: dict) -> bool:
+    """Before the first step: start the run's trace and create its git worktree.
+
+    Returns False only when the run must not proceed: the worktree couldn't be
+    created AND concurrent runs are allowed, so the shared tree isn't safe. With
+    the single-active-run guard on, a worktree failure falls back to the legacy
+    shared working tree (with a warning text) rather than killing the run.
+    """
+    run = engine.get_run(run_id)
+    fields: dict = {}
+    try:
+        trace_id, span_id = tracing.start_workflow(
+            run_id,
+            f"engram-tier-{run.get('tier')}",
+            {"engram.project": run.get("project") or "", "engram.branch": run.get("branch") or ""},
+        )
+        fields.update(trace_id=trace_id, span_id=span_id)
+    except Exception as exc:
+        log.warning(f"[orchestrate] tracing setup failed for run {run_id}: {exc}")
+
+    ok = True
+    if worktree.enabled(engram_config):
+        project = run.get("project") or ""
+        proj = resolve_project(project)
+        if proj and proj.repo:
+            try:
+                path = worktree.create(
+                    proj.repo,
+                    run_id,
+                    run.get("branch") or f"engram/run-{run_id}",
+                    pr_base(project),
+                    engram_config,
+                )
+                fields.update(worktree=str(path), worktree_repo=proj.repo)
+            except Exception as exc:
+                fields["worktree_error"] = str(exc)
+                log.warning(f"[orchestrate] worktree create failed for run {run_id}: {exc}")
+                if _single_active_run(engram_config):
+                    _send_reply(
+                        engram_config,
+                        f"⚠️ Couldn't give run {run_id} its own worktree ({exc}). "
+                        f"Running in the shared checkout {proj.repo} instead.",
+                    )
+                else:
+                    ok = False
+    if fields:
+        engine._update_run_fields(run_id, fields)
+    log.info(
+        f"[orchestrate] Run {run_id} isolation: worktree={fields.get('worktree')!r} "
+        f"trace_id={fields.get('trace_id')}"
+    )
+    return ok
+
+
+def _teardown_run_isolation(run_id: str, engine: RunEngine, engram_config: dict) -> None:
+    """After the pipeline thread finishes: remove the run's worktree (branch kept,
+    uncommitted leftovers stashed) and end its trace. A run that is somehow not
+    terminal keeps its worktree (agents may still be in it); startup recovery
+    sweeps it later."""
+    try:
+        run = engine.get_run(run_id)
+    except Exception as exc:
+        log.warning(f"[orchestrate] teardown: can't read run {run_id}: {exc}")
+        return
+    status = run.get("status") or ""
+    terminal = status in ("done", "failed", "aborted")
+    if run.get("worktree") and terminal:
+        try:
+            info = worktree.remove(run.get("worktree_repo") or "", run["worktree"], reason=status)
+            engine._update_run_fields(
+                run_id, {"worktree_removed": info["removed"], "worktree_stash": info["stash"]}
+            )
+            if info["stash"]:
+                _send_reply(
+                    engram_config,
+                    f"🧺 Run {run_id} left uncommitted work; it's stashed in "
+                    f'{run.get("worktree_repo")} as "{info["stash"]}" (`git stash list`).',
+                )
+        except Exception as exc:
+            log.warning(f"[orchestrate] worktree cleanup failed for run {run_id}: {exc}")
+    elif run.get("worktree"):
+        log.warning(f"[orchestrate] Run {run_id} ended non-terminal ({status}); keeping worktree")
+    tracing.end_workflow(run_id, status, {"engram.pr_url": run.get("pr_url")})
+
+
+def _end_step_spans(engine: RunEngine, run_id: str, idxs: list) -> None:
+    """Close the invoke_agent span of each finished step (no-op without the SDK)."""
+    try:
+        run = engine.get_run(run_id)
+    except Exception:
+        return
+    for i in idxs:
+        st = run["pipeline"][i]
+        tracing.end_step(
+            run_id,
+            i,
+            st.get("status") or "",
+            {"engram.task_id": st.get("task_id"), "engram.retry_count": st.get("retry_count", 0)},
+        )
+
+
+def _recover_orphaned_worktrees(engine: RunEngine, config: dict) -> None:
+    """Startup: remove Engram worktrees whose run isn't running (daemon crash,
+    failed cleanup). Must run AFTER startup_recover_and_cleanup()."""
+    if not worktree.enabled(config):
+        return
+    try:
+        import project_registry
+
+        runs = engine.list_runs(limit=1000)
+        live = {r.get("id") for r in runs if r.get("status") == "running"}
+        repos = {p.repo for p in project_registry.get_registry().values() if p.repo}
+        repos |= {r["worktree_repo"] for r in runs if r.get("worktree_repo")}
+        removed = worktree.recover_orphans(sorted(repos), live, config)
+        for r in runs:
+            if r.get("worktree") and r.get("id") not in live and not Path(r["worktree"]).exists():
+                if not r.get("worktree_removed"):
+                    engine._update_run_fields(r["id"], {"worktree_removed": True})
+        if removed:
+            log.warning(f"[startup] Removed {len(removed)} orphaned worktree(s): {removed}")
+    except Exception as exc:
+        log.warning(f"[startup] Orphaned-worktree sweep failed: {exc}")
+
+
 def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, engram_config: dict) -> None:
+    """Background thread entry: isolate the run (own worktree + trace), drive it,
+    and always tear the isolation down, whatever path the run ends on."""
+    try:
+        ok = _prepare_run_isolation(run_id, engine, engram_config)
+    except Exception as exc:
+        log.error(f"[orchestrate] run isolation setup crashed for {run_id}: {exc}", exc_info=True)
+        ok = _single_active_run(engram_config)
+    if not ok:
+        engine._update_run_fields(
+            run_id,
+            {
+                "status": "failed",
+                "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            },
+        )
+        _send_reply(
+            engram_config,
+            f"❌ Run {run_id} not started: couldn't create its worktree, and concurrent runs "
+            f"are on, so the shared checkout isn't safe. See logs.",
+        )
+        _teardown_run_isolation(run_id, engine, engram_config)
+        return
+    try:
+        _drive_pipeline(run_id, engine, runner, engram_config)
+    finally:
+        _teardown_run_isolation(run_id, engine, engram_config)
+
+
+def _drive_pipeline(
+    run_id: str, engine: RunEngine, runner: AgentRunner, engram_config: dict
+) -> None:
     """
     Background thread: drives a full pipeline run to completion.
 
@@ -704,6 +869,12 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, engram_co
     def _dispatch_one_step(run_id: str, idx: int, step: dict, run_snapshot: dict) -> None:
         """Dispatch a single step, poll to completion, update engine state."""
         role = step["role"]
+        # One invoke_agent span per attempt; its id becomes the step's TRACEPARENT.
+        # Mutate the snapshot's own dict: dispatch_step finds the index by identity.
+        step["span_id"] = tracing.start_step(
+            run_id, idx, role, run_snapshot.get("trace_id") or "", run_snapshot.get("span_id")
+        )
+        engine.update_step_fields(run_id, idx, {"span_id": step["span_id"]})
         try:
             task_id = runner.dispatch_step(
                 step=step,
@@ -773,6 +944,12 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, engram_co
             )
 
         final_status = engine.poll_step_completion(run_id, idx, task_id)
+
+        # `abort` kills the session, which reads as "failed" here. The abort is the
+        # last word: no retry, no failure handoff, no "Blocked" text.
+        if engine.get_run(run_id).get("status") == "aborted":
+            log.info(f"[orchestrate] Step {idx} ({role}) ended by abort — standing down")
+            return
 
         if final_status in ("done", "needs-review"):
             if final_status == "needs-review":
@@ -863,6 +1040,7 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, engram_co
             if len(next_steps) == 1:
                 idx, step = next_steps[0]
                 _dispatch_one_step(run_id, idx, step, run)
+                _end_step_spans(engine, run_id, [idx])
             else:
                 # Parallel group — spawn sub-threads, wait for all
                 log.info(
@@ -881,6 +1059,7 @@ def _run_pipeline(run_id: str, engine: RunEngine, runner: AgentRunner, engram_co
                     t.start()
                 for t in threads:
                     t.join()
+                _end_step_spans(engine, run_id, [i for i, _ in next_steps])
                 log.info(f"[orchestrate] Parallel group finished for run {run_id}")
 
     except Exception as exc:
@@ -1172,7 +1351,9 @@ def orchestrate_task(task_text: str, config: dict) -> str:
     runner = AgentRunner()
 
     try:
-        run = engine.create_run(task_raw=task_text, result=result)
+        run = engine.create_run(
+            task_raw=task_text, result=result, single_active=_single_active_run(config)
+        )
     except RuntimeError as exc:
         # Another run is already active — queue not yet supported
         log.warning(f"[orchestrate] create_run blocked: {exc}")
@@ -1317,7 +1498,11 @@ def main():
     subprocess.run([str(_BASE / "scripts" / "check-connectivity.sh")])
 
     # Recover crash-orphaned runs ONCE here — never per-message (see RunEngine).
-    RunEngine().startup_recover_and_cleanup()
+    _engine = RunEngine()
+    _engine.startup_recover_and_cleanup()
+    # …then sweep worktrees those aborted runs left behind, and set up tracing.
+    _recover_orphaned_worktrees(_engine, config)
+    tracing.init(config)
 
     # Probe model aliases so routing auto-downgrades if a tier (e.g. Fable) has left
     # the plan — a run must never die on a model the CLI can no longer reach.
